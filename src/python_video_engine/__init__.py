@@ -8,6 +8,7 @@ from .material_fetcher import (
     MaterialFileMeta,
     MaterialFetchResult,
 )
+from .runtime_config import DEFAULT_REMOTE_CONFIG_URL, get_config_value, get_runtime_config
 
 __all__ = [
     "AssemblyClip",
@@ -24,4 +25,7 @@ __all__ = [
     "MaterialFileMeta",
     "MaterialFetchResult",
     "VOICE_LIBRARY",
+    "DEFAULT_REMOTE_CONFIG_URL",
+    "get_config_value",
+    "get_runtime_config",
 ]

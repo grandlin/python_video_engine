@@ -10,6 +10,8 @@ from pathlib import Path
 import requests
 from mutagen.mp3 import MP3
 
+from .runtime_config import get_config_value, get_runtime_config
+
 logger = logging.getLogger("python_video_engine.content_generator")
 
 VOICE_LIBRARY = {
@@ -19,11 +21,7 @@ VOICE_LIBRARY = {
     "child_cute": "zh-CN-XiaoyiNeural",
 }
 DEFAULT_VOICE_KEY = "female_standard"
-TTS_API_URL = "https://tts.zunqianlin.workers.dev/v1/audio/speech"
-TTS_MAX_RETRIES = 3
-LLM_API_URL = os.getenv("LLM_API_URL", "https://api.siliconflow.cn/v1/chat/completions").strip()
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
-LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct").strip()
 
 
 @dataclass(slots=True)
@@ -47,6 +45,13 @@ class ContentGenerator:
         self.voice = VOICE_LIBRARY[self.voice_key]
         self.temp_assets_dir = self._project_root() / "temp_assets"
         self.temp_assets_dir.mkdir(parents=True, exist_ok=True)
+        self.runtime_config = get_runtime_config()
+        self.llm_api_url = os.getenv("LLM_API_URL", str(get_config_value("llm", "api_url", default=""))).strip()
+        self.llm_model = os.getenv("LLM_MODEL", str(get_config_value("llm", "model", default="Qwen/Qwen2.5-7B-Instruct"))).strip()
+        self.llm_timeout = int(get_config_value("llm", "timeout_seconds", default=90) or 90)
+        self.tts_api_url = str(get_config_value("tts", "api_url", default="https://tts.zunqianlin.workers.dev/v1/audio/speech"))
+        self.tts_timeout = int(get_config_value("tts", "timeout_seconds", default=90) or 90)
+        self.tts_max_retries = int(get_config_value("tts", "retry_count", default=3) or 3)
 
     def generate(self, base_path: str | Path, client_name: str, keywords: list[str]) -> ContentGenerationResult:
         resolved_base_path = Path(base_path).expanduser().resolve(strict=False)
@@ -85,29 +90,29 @@ class ContentGenerator:
         headers = {"Content-Type": "application/json"}
         last_error: Exception | None = None
 
-        for attempt in range(1, TTS_MAX_RETRIES + 1):
+        for attempt in range(1, self.tts_max_retries + 1):
             try:
-                response = requests.post(TTS_API_URL, json=payload, headers=headers, timeout=90)
+                response = requests.post(self.tts_api_url, json=payload, headers=headers, timeout=self.tts_timeout)
                 if response.status_code == 200:
                     with open(output_path, "wb") as f:
                         f.write(response.content)
                     print(f"[ContentGenerator] 语音已成功生成并保存至: {output_path}")
                     return
                 last_error = RuntimeError(f"语音请求失败，状态码: {response.status_code}, 详情: {response.text}")
-                logger.warning("[ContentGenerator] TTS 请求失败，第 %s/%s 次: %s", attempt, TTS_MAX_RETRIES, last_error)
+                logger.warning("[ContentGenerator] TTS 请求失败，第 %s/%s 次: %s", attempt, self.tts_max_retries, last_error)
             except requests.exceptions.SSLError as exc:
-                last_error = RuntimeError(f"TTS SSL 连接异常，第 {attempt}/{TTS_MAX_RETRIES} 次重试失败: {exc}")
+                last_error = RuntimeError(f"TTS SSL 连接异常，第 {attempt}/{self.tts_max_retries} 次重试失败: {exc}")
                 logger.warning("[ContentGenerator] %s", last_error)
             except requests.exceptions.RequestException as exc:
-                last_error = RuntimeError(f"TTS 网络请求异常，第 {attempt}/{TTS_MAX_RETRIES} 次重试失败: {exc}")
+                last_error = RuntimeError(f"TTS 网络请求异常，第 {attempt}/{self.tts_max_retries} 次重试失败: {exc}")
                 logger.warning("[ContentGenerator] %s", last_error)
 
-            if attempt < TTS_MAX_RETRIES:
+            if attempt < self.tts_max_retries:
                 time.sleep(1.5 * attempt)
 
         raise RuntimeError(
             "配音服务连接失败，已自动重试多次仍未成功。"
-            f"\n接口：{TTS_API_URL}"
+            f"\n接口：{self.tts_api_url}"
             f"\n详情：{last_error}"
         )
 
@@ -131,7 +136,7 @@ class ContentGenerator:
         )
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LLM_API_KEY}"}
         payload = {
-            "model": LLM_MODEL,
+            "model": self.llm_model,
             "temperature": 0.9,
             "messages": [
                 {"role": "system", "content": "你擅长撰写中文外贸工厂短视频口播文案。"},
@@ -139,12 +144,12 @@ class ContentGenerator:
             ],
         }
         try:
-            response = requests.post(LLM_API_URL, json=payload, headers=headers, timeout=90)
+            response = requests.post(self.llm_api_url, json=payload, headers=headers, timeout=self.llm_timeout)
             response.raise_for_status()
             data = response.json()
             content = data["choices"][0]["message"]["content"].strip()
             if content:
-                logger.info("[ContentGenerator] 大模型文案生成成功: model=%s", LLM_MODEL)
+                logger.info("[ContentGenerator] 大模型文案生成成功: model=%s", self.llm_model)
                 return content.replace("\n", " ").strip()
         except Exception as exc:
             logger.warning("[ContentGenerator] 大模型文案生成失败，回退关键词模板文案: %s", exc)

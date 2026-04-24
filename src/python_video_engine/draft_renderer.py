@@ -5,6 +5,7 @@ from datetime import datetime,timezone
 from pathlib import Path
 from .assembly_engine import AssemblyPlan
 from .content_generator import ContentGenerationResult
+from .runtime_config import get_config_value
 logger=logging.getLogger("python_video_engine.draft_renderer")
 JY_TICKS_PER_SECOND=1_000_000
 DEFAULT_CANVAS_WIDTH=1080
@@ -13,9 +14,6 @@ DEFAULT_FPS=30.0
 DEFAULT_DRAFT_VERSION="6.0.0"
 SENTENCE_PUNCTUATION="，。！？；：,.!?、"
 PUNCTUATION_PATTERN=r"[\s，。！？、“”‘’；：,.!?、]"
-SUBTITLE_MIN_CHARS=8
-SUBTITLE_MAX_CHARS=14
-SUBTITLE_FONT_SIZE=11
 SUBTITLE_POS_X=0.0
 SUBTITLE_POS_Y=-1470.0/DEFAULT_CANVAS_HEIGHT
 SUBTITLE_STROKE_WIDTH=0.8
@@ -27,6 +25,9 @@ class DraftRenderer:
     def __init__(self)->None:
         if not logging.getLogger().handlers: logging.basicConfig(level=logging.INFO,format="%(message)s")
         self.output_root=self._project_root()/"output_drafts"; self.output_root.mkdir(parents=True,exist_ok=True)
+        self.subtitle_min_chars=int(get_config_value("subtitle","min_chars",default=8) or 8)
+        self.subtitle_max_chars=int(get_config_value("subtitle","max_chars",default=14) or 14)
+        self.subtitle_font_size=int(get_config_value("subtitle","font_size",default=11) or 11)
     def render(self,assembly_plan:AssemblyPlan,content_result:ContentGenerationResult)->DraftRenderResult:
         name=f"{assembly_plan.client_name}_AI初稿"; draft_dir=self.output_root/name; draft_dir.mkdir(parents=True,exist_ok=True)
         subs=self._build_subtitle_chunks(content_result.script_text,content_result.audio_duration_seconds)
@@ -57,8 +58,8 @@ class DraftRenderer:
             tseg.append({"id":self._uuid(),"material_id":tid,"target_timerange":{"start":ts,"duration":tt},"source_timerange":{"start":0,"duration":tt},"extra_material_refs":[],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":1.0,"y":1.0},"transform":{"x":SUBTITLE_POS_X,"y":SUBTITLE_POS_Y}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True})
         return {"id":self._uuid(),"name":f"{plan.client_name}_AI初稿","duration":total,"fps":DEFAULT_FPS,"color_space":0,"canvas_config":{"ratio":"9:16","width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT},"config":{"maintrack_adsorb":True,"material_save_mode":0,"subtitle_sync":True,"lyrics_sync":False,"video_mute":False},"keyframes":{"adjusts":[],"audios":[],"effects":[],"filters":[],"texts":[],"videos":[]},"materials":{"videos":videos,"audios":audios,"texts":texts,"canvases":canvases,"effects":[],"transitions":[],"video_effects":[],"sound_channel_mappings":sound_maps,"speeds":speeds,"audio_fades":[]},"tracks":[{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"视频主轨","type":"video","segments":vseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"音频轨","type":"audio","segments":aseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"字幕轨","type":"text","segments":tseg}],"platform":{"os":"windows","app":"jianying_pro"},"version":DEFAULT_DRAFT_VERSION,"created_at":self._now_iso(),"updated_at":self._now_iso()}
     def _build_text_material(self,tid:str,text:str)->dict[str,object]:
-        content=json.dumps({"text":text,"styles":[{"range":[0,len(text)],"size":SUBTITLE_FONT_SIZE,"font_name":SUBTITLE_FONT_NAME,"color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"bold":False,"italic":False,"underline":False,"scale":{"x":1.0,"y":1.0}}]},ensure_ascii=False)
-        return {"id":tid,"type":"text","content":content,"text":text,"font_size":SUBTITLE_FONT_SIZE,"font_name":SUBTITLE_FONT_NAME,"font_path":"","text_color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"background_alpha":0.0,"alignment":1,"bold":False,"italic":False,"underline":False,"scale":{"x":1.0,"y":1.0},"text_style":{"size":SUBTITLE_FONT_SIZE,"font_name":SUBTITLE_FONT_NAME,"color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"scale":{"x":1.0,"y":1.0}}}
+        content=json.dumps({"text":text,"styles":[{"range":[0,len(text)],"size":self.subtitle_font_size,"font_name":SUBTITLE_FONT_NAME,"color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"bold":False,"italic":False,"underline":False,"scale":{"x":1.0,"y":1.0}}]},ensure_ascii=False)
+        return {"id":tid,"type":"text","content":content,"text":text,"font_size":self.subtitle_font_size,"font_name":SUBTITLE_FONT_NAME,"font_path":"","text_color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"background_alpha":0.0,"alignment":1,"bold":False,"italic":False,"underline":False,"scale":{"x":1.0,"y":1.0},"text_style":{"size":self.subtitle_font_size,"font_name":SUBTITLE_FONT_NAME,"color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"scale":{"x":1.0,"y":1.0}}}
     def _build_subtitle_chunks(self,script_text:str,audio_duration_seconds:float)->list[dict[str,float|int|str]]:
         sentence_units=self._split_by_punctuation(script_text)
         if not sentence_units: return []
@@ -90,16 +91,16 @@ class DraftRenderer:
     def _normalize_subtitle_text(self,text:str)->str:
         return re.sub(r"[\s]+","",text).strip("，。！？；：,.!?、")
     def _split_long_unit(self,text:str)->list[str]:
-        if len(text)<=SUBTITLE_MAX_CHARS: return [text]
+        if len(text)<=self.subtitle_max_chars: return [text]
         chunks=[]; remaining=text
-        while len(remaining)>SUBTITLE_MAX_CHARS:
+        while len(remaining)>self.subtitle_max_chars:
             split_at=self._best_split_index(remaining)
             chunks.append(remaining[:split_at])
             remaining=remaining[split_at:]
         if remaining: chunks.append(remaining)
         return chunks
     def _best_split_index(self,text:str)->int:
-        max_idx=min(len(text),SUBTITLE_MAX_CHARS); min_idx=min(SUBTITLE_MIN_CHARS,max_idx)
+        max_idx=min(len(text),self.subtitle_max_chars); min_idx=min(self.subtitle_min_chars,max_idx)
         preferred=["，","、","与","和","及","并","让","把","为"]
         search=text[:max_idx]
         for marker in preferred:
@@ -110,7 +111,7 @@ class DraftRenderer:
         if not chunks: return []
         merged=[]
         for chunk in chunks:
-            if merged and len(chunk)<SUBTITLE_MIN_CHARS and len(merged[-1])+len(chunk)<=SUBTITLE_MAX_CHARS:
+            if merged and len(chunk)<self.subtitle_min_chars and len(merged[-1])+len(chunk)<=self.subtitle_max_chars:
                 merged[-1]+=chunk
             else:
                 merged.append(chunk)
