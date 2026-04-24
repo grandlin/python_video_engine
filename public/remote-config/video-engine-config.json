@@ -1,0 +1,18 @@
+{
+  "version": "2026.04.23.1",
+  "llm": {
+    "api_url": "https://api.siliconflow.cn/v1/chat/completions",
+    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "timeout_seconds": 90
+  },
+  "tts": {
+    "api_url": "https://tts.zunqianlin.workers.dev/v1/audio/speech",
+    "timeout_seconds": 90,
+    "retry_count": 3
+  },
+  "subtitle": {
+    "font_size": 11,
+    "min_chars": 8,
+    "max_chars": 14
+  }
+}
