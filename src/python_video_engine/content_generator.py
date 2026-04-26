@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import httpx
 import requests
 from dotenv import load_dotenv
 from mutagen.mp3 import MP3
+from pydub import AudioSegment
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from .network import ProxySettings, build_httpx_client, check_tcp_connectivity
@@ -56,6 +58,8 @@ class ContentGenerationResult:
     tts_provider: str
     script_language: str
     script_structure: dict[str, str]
+    subtitle_units: list[str] = field(default_factory=list)
+    subtitle_durations_ms: list[int] = field(default_factory=list)
 
 
 class ContentGenerator:
@@ -115,7 +119,8 @@ class ContentGenerator:
             logger.info("[ContentGenerator] translation_enabled=true，但当前版本已屏蔽翻译调用")
 
         audio_path = self._build_audio_output_path(client_name=client_name)
-        self.generate_voice(text=script_text, voice_name=self.voice, output_path=audio_path)
+        subtitle_units = self._split_script_into_units(script_text, self.target_language)
+        subtitle_durations_ms = self._generate_audio_by_units(subtitle_units, self.voice, audio_path)
         self._ensure_valid_audio_file(audio_path)
         audio_duration_seconds = self._resolve_audio_duration(audio_path)
 
@@ -131,7 +136,61 @@ class ContentGenerator:
             tts_provider="worker-tts",
             script_language=self.target_language,
             script_structure=script_structure,
+            subtitle_units=subtitle_units,
+            subtitle_durations_ms=subtitle_durations_ms,
         )
+
+    def _split_script_into_units(self, script_text: str, target_language: str) -> list[str]:
+        cleaned = " ".join(script_text.split()).strip()
+        if not cleaned:
+            return []
+        punctuation = set(".!?,;:") if target_language == SCRIPT_LANGUAGE_EN else set("，。！？；：,.!?、")
+
+        units: list[str] = []
+        buf: list[str] = []
+        for ch in cleaned:
+            if ch in "\r\n":
+                continue
+            buf.append(ch)
+            if ch in punctuation:
+                unit = "".join(buf).strip()
+                if unit:
+                    units.append(unit)
+                buf = []
+        if buf:
+            unit = "".join(buf).strip()
+            if unit:
+                units.append(unit)
+        return units
+
+    def _generate_audio_by_units(self, units: list[str], voice_name: str, output_path: Path) -> list[int]:
+        if not units:
+            self.generate_voice(text=" ", voice_name=voice_name, output_path=output_path)
+            return [max(int(round(self._resolve_audio_duration(output_path) * 1000)), 1)]
+
+        durations_ms: list[int] = []
+        combined = AudioSegment.silent(duration=0)
+        temp_files: list[Path] = []
+
+        try:
+            for index, unit in enumerate(units):
+                temp_path = output_path.with_name(f"{output_path.stem}_u{index:03d}.mp3")
+                temp_files.append(temp_path)
+                self.generate_voice(text=unit, voice_name=voice_name, output_path=temp_path)
+                self._ensure_valid_audio_file(temp_path)
+                dur_ms = max(int(round(self._resolve_audio_duration(temp_path) * 1000)), 1)
+                durations_ms.append(dur_ms)
+                combined += AudioSegment.from_file(str(temp_path), format="mp3")
+            combined.export(str(output_path), format="mp3")
+        finally:
+            for file in temp_files:
+                try:
+                    if file.exists():
+                        file.unlink()
+                except Exception:
+                    pass
+
+        return durations_ms
 
     def generate_voice(self, text: str, voice_name: str, output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)

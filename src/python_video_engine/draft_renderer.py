@@ -41,7 +41,7 @@ class DraftRenderer:
         self.subtitle_font_size=int(get_config_value("subtitle","font_size",default=11) or 11)
     def render(self,assembly_plan:AssemblyPlan,content_result:ContentGenerationResult)->DraftRenderResult:
         name=f"{assembly_plan.client_name}_AI初稿"; draft_dir=self.output_root/name; draft_dir.mkdir(parents=True,exist_ok=True)
-        subs=self._build_subtitle_chunks(content_result.script_text,content_result.audio_duration_seconds,content_result.script_language); self._post_validate_subtitle_texts(content_result.script_text,subs,content_result.script_language)
+        subs=self._build_subtitle_chunks(content_result); self._post_validate_subtitle_texts(content_result.script_text,subs,content_result.script_language)
         content=self._build_draft_content(assembly_plan,content_result,subs)
         meta=self._build_draft_meta_info(assembly_plan,content_result,name,subs)
         cp=draft_dir/"draft_content.json"; mp=draft_dir/"draft_meta_info.json"
@@ -65,7 +65,7 @@ class DraftRenderer:
             cursor+=ct
         total=max(total,cursor)
         for chunk in subs:
-            tid=self._uuid(); tt=self._seconds_to_ticks(float(chunk["duration_seconds"])); ts=self._seconds_to_ticks(float(chunk["start_seconds"]))
+            tid=self._uuid(); tt=int(chunk.get("duration_ticks") or self._seconds_to_ticks(float(chunk["duration_seconds"]))); ts=int(chunk.get("start_ticks") or self._seconds_to_ticks(float(chunk["start_seconds"])))
             texts.append(self._build_text_material(tid,chunk))
             tseg.append({"id":self._uuid(),"material_id":tid,"target_timerange":{"start":ts,"duration":tt},"source_timerange":{"start":0,"duration":tt},"extra_material_refs":[],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":1.0,"y":1.0},"transform":{"x":SUBTITLE_POS_X,"y":SUBTITLE_POS_Y}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True})
         return {"id":self._uuid(),"name":f"{plan.client_name}_AI初稿","duration":total,"fps":DEFAULT_FPS,"color_space":0,"canvas_config":{"ratio":"9:16","width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT},"config":{"maintrack_adsorb":True,"material_save_mode":0,"subtitle_sync":True,"lyrics_sync":False,"video_mute":False},"keyframes":{"adjusts":[],"audios":[],"effects":[],"filters":[],"texts":[],"videos":[]},"materials":{"videos":videos,"audios":audios,"texts":texts,"canvases":canvases,"effects":[],"transitions":[],"video_effects":[],"sound_channel_mappings":sound_maps,"speeds":speeds,"audio_fades":[]},"tracks":[{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"视频主轨","type":"video","segments":vseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"音频轨","type":"audio","segments":aseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"字幕轨","type":"text","segments":tseg}],"platform":{"os":"windows","app":"jianying_pro"},"version":DEFAULT_DRAFT_VERSION,"created_at":self._now_iso(),"updated_at":self._now_iso()}
@@ -77,17 +77,31 @@ class DraftRenderer:
         style={"range":style_range,"size":font_size,"font_name":SUBTITLE_FONT_NAME,"color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"bold":False,"italic":False,"underline":False,"scale":{"x":1.0,"y":1.0},"alignment":SUBTITLE_ALIGNMENT_CENTER}
         content=json.dumps({"text":render_text,"styles":[style],"paragraphs":[{"range":style_range,"alignment":SUBTITLE_ALIGNMENT_CENTER,"line_break":True}],"bounding_box":{"width_ratio":SUBTITLE_TEXTBOX_WIDTH_RATIO,"height_ratio":SUBTITLE_TEXTBOX_HEIGHT_RATIO},"wrap":True,"auto_scale":True},ensure_ascii=False)
         return {"id":tid,"type":"text","content":content,"text":render_text,"font_size":font_size,"font_name":SUBTITLE_FONT_NAME,"font_path":"","text_color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"background_alpha":0.0,"alignment":SUBTITLE_ALIGNMENT_CENTER,"bold":False,"italic":False,"underline":False,"scale":{"x":1.0,"y":1.0},"text_style":{"size":font_size,"font_name":SUBTITLE_FONT_NAME,"color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"scale":{"x":1.0,"y":1.0},"alignment":SUBTITLE_ALIGNMENT_CENTER},"bounding_box":{"width":round(DEFAULT_CANVAS_WIDTH*SUBTITLE_TEXTBOX_WIDTH_RATIO,2),"height":round(DEFAULT_CANVAS_HEIGHT*SUBTITLE_TEXTBOX_HEIGHT_RATIO,2)},"wrap":True,"auto_scale":True}
-    def _build_subtitle_chunks(self,script_text:str,audio_duration_seconds:float,script_language:str)->list[dict[str,float|int|str]]:
-        lang=(script_language or 'zh').lower()
-        raw_slices=self._split_english_by_words(script_text) if lang.startswith('en') else self._split_chinese(script_text)
+    def _build_subtitle_chunks(self,result:ContentGenerationResult)->list[dict[str,float|int|str]]:
+        lang=(result.script_language or 'zh').lower()
+        script_text=result.script_text; audio_duration_seconds=float(result.audio_duration_seconds or 0.0)
+        if result.subtitle_units and len(result.subtitle_units)==len(result.subtitle_durations_ms):
+            raw_slices=[str(x).strip() for x in result.subtitle_units if str(x).strip()]
+        else:
+            raw_slices=self._split_english_by_words(script_text) if lang.startswith('en') else self._split_chinese(script_text)
         if not raw_slices: return []
         prepared=[self._prepare_subtitle_layout(text,lang) for text in raw_slices]
         weights=[self._chunk_weight(str(x["text"])) for x in prepared]; total=sum(weights) or 1.0; cursor=0.0; out=[]
+        use_precise=len(result.subtitle_durations_ms)==len(prepared)
+        precise_ms=[max(int(v),1) for v in result.subtitle_durations_ms] if use_precise else []
+        cursor_ms=0
         for i,chunk in enumerate(prepared):
-            dur=round(audio_duration_seconds*(weights[i]/total),3)
-            if i==len(prepared)-1: dur=round(max(audio_duration_seconds-cursor,0.0),3)
-            start=round(cursor,3); cursor=round(cursor+dur,3)
-            item={**chunk,"char_count":len(str(chunk["text"])),"start_seconds":start,"duration_seconds":dur}; out.append(item)
+            if use_precise:
+                dur_ms=precise_ms[i]
+                start=round(cursor_ms/1000.0,3)
+                dur=round(dur_ms/1000.0,3)
+                cursor_ms+=dur_ms
+            else:
+                dur=round(audio_duration_seconds*(weights[i]/total),3)
+                if i==len(prepared)-1: dur=round(max(audio_duration_seconds-cursor,0.0),3)
+            if not use_precise:
+                start=round(cursor,3); cursor=round(cursor+dur,3)
+            item={**chunk,"char_count":len(str(chunk["text"])),"start_seconds":start,"duration_seconds":dur,"start_ticks":int(round(start*1000))*1000,"duration_ticks":int(round(dur*1000))*1000}; out.append(item)
             logger.info("[DraftRenderer][Subtitle] chunk=%s render=%s chars=%s start=%.3fs duration=%.3fs font=%.2f",chunk["text"],chunk.get("render_text"),len(str(chunk["text"])),start,dur,float(chunk.get("font_size") or self.subtitle_font_size))
         return out
     def _prepare_subtitle_layout(self,text:str,lang:str)->dict[str,object]:
