@@ -63,6 +63,7 @@ class DraftRenderer:
             canvases.append({"id":cid,"type":"canvas_color","color":"#000000"}); sound_maps.append({"id":sid,"is_config_open":False,"type":"stereo"}); speeds.append({"id":spid,"mode":0,"speed":1.0,"type":"speed"})
             vseg.append({"id":self._uuid(),"material_id":vid,"target_timerange":{"start":cursor,"duration":ct},"source_timerange":{"start":st,"duration":ct},"extra_material_refs":[cid,sid,spid],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":1.0,"y":1.0},"transform":{"x":0.0,"y":0.0}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":0.0})
             cursor+=ct
+        total=max(total,cursor)
         for chunk in subs:
             tid=self._uuid(); tt=self._seconds_to_ticks(float(chunk["duration_seconds"])); ts=self._seconds_to_ticks(float(chunk["start_seconds"]))
             texts.append(self._build_text_material(tid,chunk))

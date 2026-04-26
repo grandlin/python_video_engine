@@ -18,6 +18,7 @@ FALLBACK_CATEGORY = "machine"
 MIN_CLIP_SECONDS = 3.0
 MAX_CLIP_SECONDS = 4.0
 AVOID_HEAD_SECONDS = 1.0
+TAIL_SAFETY_SECONDS = 0.8
 
 
 @dataclass(slots=True)
@@ -73,11 +74,13 @@ class AssemblyEngine:
             fulfilled_seconds_by_category[category] = round(fulfilled_seconds, 3)
             borrowed_seconds_by_category[category] = round(borrowed_seconds, 3)
 
+        required_video_total = round(total_audio_duration_seconds + TAIL_SAFETY_SECONDS, 3)
         actual_total = round(sum(item.clip_duration_seconds for item in clips), 3)
-        if actual_total < total_audio_duration_seconds:
-            gap = round(total_audio_duration_seconds - actual_total, 3)
-            logger.info("[Assembly] 总时长仍有缺口，继续向 02 借用: gap=%.3fs", gap)
-            extra_clips, extra_seconds, _ = self._allocate_from_pool(
+
+        if actual_total < required_video_total:
+            gap = round(required_video_total - actual_total, 3)
+            logger.info("[Assembly] 总时长仍有缺口，向 02 借用并末尾补齐: gap=%.3fs", gap)
+            extra_clips, extra_seconds, remaining = self._allocate_from_pool(
                 source_category=FALLBACK_CATEGORY,
                 requested_category=FALLBACK_CATEGORY,
                 target_seconds=gap,
@@ -85,9 +88,23 @@ class AssemblyEngine:
                 order_start=len(clips),
             )
             clips.extend(extra_clips)
-            fulfilled_seconds_by_category[FALLBACK_CATEGORY] = round(fulfilled_seconds_by_category[FALLBACK_CATEGORY] + extra_seconds, 3)
+            fulfilled_seconds_by_category[FALLBACK_CATEGORY] = round(
+                fulfilled_seconds_by_category[FALLBACK_CATEGORY] + extra_seconds, 3
+            )
 
-        logger.info("[Assembly] 组装完成: clips=%s total_allocated=%.3fs", len(clips), sum(item.clip_duration_seconds for item in clips))
+            if remaining > 0 and clips:
+                logger.info("[Assembly] 素材不足，使用最后片段循环填充: remaining=%.3fs", remaining)
+                clips = self._pad_with_last_clip(clips=clips, pad_seconds=remaining)
+
+        actual_total = round(sum(item.clip_duration_seconds for item in clips), 3)
+        if actual_total < required_video_total:
+            logger.warning(
+                "[Assembly] 视频时长仍短于目标（含安全余量），可能出现末尾空缺: video=%.3fs required=%.3fs",
+                actual_total,
+                required_video_total,
+            )
+
+        logger.info("[Assembly] 组装完成: clips=%s total_allocated=%.3fs", len(clips), actual_total)
         return AssemblyPlan(
             client_name=client_name,
             base_path=str(resolved_base_path),
@@ -145,6 +162,29 @@ class AssemblyEngine:
             remaining = round(max(target_seconds - fulfilled_seconds, 0.0), 3)
             logger.info("[Assembly] 片段分配: requested=%s source=%s file=%s start=%.3f end=%.3f duration=%.3f remaining=%.3f", requested_category, source_category, clip.file_name, clip.clip_start_seconds, clip.clip_end_seconds, clip.clip_duration_seconds, remaining)
         return clips, fulfilled_seconds, remaining
+
+    def _pad_with_last_clip(self, clips: list[AssemblyClip], pad_seconds: float) -> list[AssemblyClip]:
+        remaining = round(max(pad_seconds, 0.0), 3)
+        if remaining <= 0 or not clips:
+            return clips
+
+        last = clips[-1]
+        loop_unit = round(max(last.clip_duration_seconds, 0.1), 3)
+        while remaining > 0:
+            piece = round(min(loop_unit, remaining), 3)
+            appended = AssemblyClip(
+                order_index=len(clips),
+                source_category=last.source_category,
+                allocated_category=last.allocated_category,
+                file_name=last.file_name,
+                absolute_path=last.absolute_path,
+                clip_start_seconds=last.clip_start_seconds,
+                clip_end_seconds=round(last.clip_start_seconds + piece, 3),
+                clip_duration_seconds=piece,
+            )
+            clips.append(appended)
+            remaining = round(max(remaining - piece, 0.0), 3)
+        return clips
 
     def _pick_fragment_duration(self, remaining: float, material_duration: float) -> float:
         safe_remaining = round(max(remaining, 0.0), 3)
