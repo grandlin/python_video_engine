@@ -12,7 +12,7 @@ import httpx
 import requests
 from dotenv import load_dotenv
 from mutagen.mp3 import MP3
-from pydub import AudioSegment
+from moviepy.editor import AudioFileClip, concatenate_audioclips
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from .network import ProxySettings, build_httpx_client, check_tcp_connectivity
@@ -169,7 +169,8 @@ class ContentGenerator:
             return [max(int(round(self._resolve_audio_duration(output_path) * 1000)), 1)]
 
         durations_ms: list[int] = []
-        combined = AudioSegment.silent(duration=0)
+        clips: list[AudioFileClip] = []
+        merged = None
         temp_files: list[Path] = []
 
         try:
@@ -180,9 +181,22 @@ class ContentGenerator:
                 self._ensure_valid_audio_file(temp_path)
                 dur_ms = max(int(round(self._resolve_audio_duration(temp_path) * 1000)), 1)
                 durations_ms.append(dur_ms)
-                combined += AudioSegment.from_file(str(temp_path), format="mp3")
-            combined.export(str(output_path), format="mp3")
+                # concatenation handled after loop
+            clips = [AudioFileClip(str(path)) for path in temp_files]
+            if clips:
+                merged = concatenate_audioclips(clips)
+                merged.write_audiofile(str(output_path), fps=44100, logger=None)
         finally:
+            try:
+                if merged is not None:
+                    merged.close()
+            except Exception:
+                pass
+            for clip in clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
             for file in temp_files:
                 try:
                     if file.exists():
