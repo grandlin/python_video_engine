@@ -66,11 +66,11 @@ If `--draft-box-path` is omitted in CLI mode, the app will try to use the saved 
 
 For real AI script generation, configure these environment variables before running:
 
-- `LLM_API_URL`
-- `LLM_API_KEY`
-- optional `LLM_MODEL` (default: `gpt-4o-mini`)
+- `SILICONFLOW_API_KEY`
+- optional `LLM_API_URL` (default base: `https://api.siliconflow.cn/v1`)
+- optional `LLM_MODEL` (default: `Qwen/Qwen2.5-7B-Instruct`)
 
-If they are not configured, the app will fall back to built-in template copywriting.
+If `SILICONFLOW_API_KEY` is missing, or the LLM request fails, the app raises an explicit error directly (no built-in template fallback).
 
 ```bash
 python main.py --base-path "Z:\00_客户06105名点工贸_测试" --client-name "名点工贸" --voice female_standard --draft-box-path "C:\Users\用户名\AppData\Local\JianyingPro\User Data\Projects\com.lveditor.draft" --json

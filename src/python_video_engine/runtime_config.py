@@ -11,25 +11,37 @@ import requests
 
 logger = logging.getLogger("python_video_engine.runtime_config")
 
-DEFAULT_REMOTE_CONFIG_URL = (
-    "https://python-video-engine-57pd-k5waf6gmn-grand1.vercel.app/remote-config/video-engine-config.json"
-)
+DEFAULT_REMOTE_CONFIG_URL = ""
 REMOTE_CONFIG_URL = os.getenv("VIDEO_ENGINE_REMOTE_CONFIG_URL", DEFAULT_REMOTE_CONFIG_URL).strip()
 LOCAL_CONFIG_PATH = Path.home() / ".python_video_engine_runtime_config.json"
 PROJECT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "remote-config" / "video-engine-config.json"
 
-
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": "local-default",
     "llm": {
-        "api_url": "https://api.siliconflow.cn/v1/chat/completions",
+        "api_url": "https://api.siliconflow.cn/v1",
         "model": "Qwen/Qwen2.5-7B-Instruct",
-        "timeout_seconds": 90,
+        "timeout_seconds": 120,
+        "api_key_env": "SILICONFLOW_API_KEY",
+        "requires_api_key": True,
+        "system_prompt": "你擅长撰写中文外贸工厂短视频口播文案。",
+        "script_language": "zh-CN",
+        "translation_enabled": False,
     },
     "tts": {
         "api_url": "https://tts.zunqianlin.workers.dev/v1/audio/speech",
-        "timeout_seconds": 90,
+        "timeout_seconds": 120,
         "retry_count": 3,
+        "model": "tts-1",
+    },
+    "voices": {
+        "default_label": "温柔女声",
+        "items": [
+            {"label": "温柔女声", "key": "female_standard", "provider_voice": "zh-CN-XiaoxiaoNeural", "enabled": True},
+            {"label": "活力男声", "key": "male_dynamic", "provider_voice": "zh-CN-YunxiNeural", "enabled": True},
+            {"label": "成熟男声", "key": "male_mature", "provider_voice": "zh-CN-YunjianNeural", "enabled": True},
+            {"label": "童声", "key": "child_cute", "provider_voice": "zh-CN-XiaoyiNeural", "enabled": True},
+        ],
     },
     "subtitle": {
         "font_size": 11,
@@ -98,3 +110,27 @@ def get_config_value(*keys: str, default: Any = None) -> Any:
             return default
         data = data[key]
     return data
+
+
+def get_enabled_voices() -> list[dict[str, Any]]:
+    items = get_config_value("voices", "items", default=[]) or []
+    enabled: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if not item.get("enabled", True):
+            continue
+        label = str(item.get("label", "")).strip()
+        key = str(item.get("key", "")).strip()
+        provider_voice = str(item.get("provider_voice", "")).strip()
+        if label and key and provider_voice:
+            enabled.append({"label": label, "key": key, "provider_voice": provider_voice})
+    return enabled
+
+
+def get_default_voice_label() -> str:
+    configured = str(get_config_value("voices", "default_label", default="")).strip()
+    labels = [item["label"] for item in get_enabled_voices()]
+    if configured and configured in labels:
+        return configured
+    return labels[0] if labels else "温柔女声"

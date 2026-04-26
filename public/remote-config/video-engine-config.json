@@ -1,14 +1,29 @@
 {
-  "version": "2026.04.23.1",
+  "version": "2026.04.24.1",
   "llm": {
-    "api_url": "https://api.siliconflow.cn/v1/chat/completions",
+    "api_url": "https://api.siliconflow.cn/v1",
     "model": "Qwen/Qwen2.5-7B-Instruct",
-    "timeout_seconds": 90
+    "timeout_seconds": 90,
+    "api_key_env": "SILICONFLOW_API_KEY",
+    "requires_api_key": true,
+    "system_prompt": "你擅长撰写中文外贸工厂短视频口播文案。",
+    "script_language": "zh-CN",
+    "translation_enabled": false
   },
   "tts": {
     "api_url": "https://tts.zunqianlin.workers.dev/v1/audio/speech",
     "timeout_seconds": 90,
-    "retry_count": 3
+    "retry_count": 3,
+    "model": "tts-1"
+  },
+  "voices": {
+    "default_label": "温柔女声",
+    "items": [
+      { "label": "温柔女声", "key": "female_standard", "provider_voice": "zh-CN-XiaoxiaoNeural", "enabled": true },
+      { "label": "活力男声", "key": "male_dynamic", "provider_voice": "zh-CN-YunxiNeural", "enabled": true },
+      { "label": "成熟男声", "key": "male_mature", "provider_voice": "zh-CN-YunjianNeural", "enabled": true },
+      { "label": "童声", "key": "child_cute", "provider_voice": "zh-CN-XiaoyiNeural", "enabled": true }
+    ]
   },
   "subtitle": {
     "font_size": 11,
