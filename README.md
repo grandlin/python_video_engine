@@ -1,5 +1,11 @@
 # Python Video Engine
 
+## v0.1.1（2026-04-26）更新说明
+
+- 修复英文朗读/英文字幕处理：补全英文文本切分与换行逻辑，避免生成草稿阶段因英文处理缺失导致崩溃。
+- 修复 API 连接与网络稳定性：支持系统代理/自定义代理（不再写死本地端口），并统一超时与重试；启动时增加网络连通性检查提示。
+- 运行时配置加载更稳：默认关闭远程配置加载，避免 401 导致的启动失败，改用本地配置/缓存兜底。
+
 This isolated directory hosts the new Python backend video processing engine.
 
 Current scope:
