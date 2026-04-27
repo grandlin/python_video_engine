@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -137,7 +138,8 @@ class MaterialFetcher:
             logger.info("[MaterialFetcher] 目标路径不是目录，跳过: category=%s path=%s", category, folder_path)
             return []
 
-        mp4_files = sorted(path for path in folder_path.iterdir() if path.is_file() and path.suffix.lower() == ".mp4")
+        mp4_files = [path for path in folder_path.iterdir() if path.is_file() and path.suffix.lower() == ".mp4"]
+        random.shuffle(mp4_files)
         if not mp4_files:
             logger.info("[MaterialFetcher] 目录中无 mp4 素材: category=%s path=%s", category, folder_path)
             return []

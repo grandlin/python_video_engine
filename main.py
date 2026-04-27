@@ -1,24 +1,89 @@
 ﻿from __future__ import annotations
-import argparse,json,shutil,sys,threading,tkinter as tk
+import argparse,json,os,shutil,socket,sys,threading,tkinter as tk
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from pprint import pprint
 from tkinter import filedialog,messagebox,ttk
 from dotenv import load_dotenv
+
+
+def _install_audioop_compat() -> None:
+    try:
+        import audioop  # noqa: F401
+        return
+    except Exception:
+        pass
+
+    import importlib
+    import os
+
+    candidates: list[str] = []
+    env_name = os.getenv("AUDIOOP_COMPAT_MODULE", "").strip()
+    if env_name:
+        candidates.append(env_name)
+    candidates.extend([
+        "pyaudioop",
+        "audioop_compat",
+        "audioop_lts",
+    ])
+
+    for name in candidates:
+        try:
+            mod = importlib.import_module(name)
+            sys.modules["audioop"] = mod
+            return
+        except Exception:
+            continue
+
+
+_install_audioop_compat()
+
 from src.python_video_engine import AssemblyEngine,ContentGenerator,DraftRenderer,MaterialFetcher
 from src.python_video_engine.network import ProxySettings, check_tcp_connectivity
-load_dotenv(Path(__file__).resolve().parent / '.env')
+
+def _load_env_for_runtime() -> None:
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / ".env")
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / ".env")
+    else:
+        candidates.append(Path(__file__).resolve().parent / ".env")
+    candidates.append(Path.cwd() / ".env")
+    for p in candidates:
+        load_dotenv(p, override=False)
+
+
+def _auto_configure_proxy_from_common_ports() -> None:
+    if any(str(os.getenv(k, "")).strip() for k in ("CUSTOM_PROXY_URL", "HTTPS_PROXY", "HTTP_PROXY")):
+        return
+    for port in (7897, 7890, 10809, 20171):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                proxy = f"http://127.0.0.1:{port}"
+                os.environ["HTTP_PROXY"] = proxy
+                os.environ["HTTPS_PROXY"] = proxy
+                os.environ["USE_PROXY"] = "true"
+                os.environ["CUSTOM_PROXY_URL"] = proxy
+                print(f"[Proxy] 已自动识别本地代理: {proxy}")
+                return
+        except Exception:
+            continue
+
+_load_env_for_runtime()
+_auto_configure_proxy_from_common_ports()
 
 def startup_network_check() -> None:
     settings = ProxySettings.from_env()
     if settings.use_proxy and settings.custom_proxy_url:
         return
-    ok, detail = check_tcp_connectivity("api.siliconflow.cn", 443, timeout_seconds=3.0)
+    ok, detail = check_tcp_connectivity("dashscope.aliyuncs.com", 443, timeout_seconds=3.0)
     if not ok:
         messagebox.showerror(
             "网络异常",
-            "无法连接到 AI 服务器，请检查网络或代理设置\n" + "目标：api.siliconflow.cn:443\n" + f"详情：{detail}",
+            "无法连接到 AI 服务器，请检查网络或代理设置\n" + "目标：dashscope.aliyuncs.com:443\n" + f"详情：{detail}",
         )
 
 

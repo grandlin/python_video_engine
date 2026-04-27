@@ -4,7 +4,6 @@ import logging
 import os
 import socket
 from dataclasses import dataclass
-from typing import Optional
 
 import httpx
 
@@ -20,6 +19,10 @@ class ProxySettings:
     def from_env() -> "ProxySettings":
         use_proxy = str(os.getenv("USE_PROXY", "False")).strip().lower() in {"1", "true", "yes", "y", "on"}
         custom = str(os.getenv("CUSTOM_PROXY_URL", "")).strip()
+        if not custom:
+            custom = str(os.getenv("HTTPS_PROXY", "")).strip() or str(os.getenv("HTTP_PROXY", "")).strip()
+        if custom:
+            use_proxy = True
         return ProxySettings(use_proxy=use_proxy, custom_proxy_url=custom)
 
     def to_proxy_url(self) -> str | None:

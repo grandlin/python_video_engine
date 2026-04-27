@@ -30,7 +30,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "tts": {
         "api_url": "https://tts.zunqianlin.workers.dev/v1/audio/speech",
-        "timeout_seconds": 120,
+        "timeout_seconds": 180,
         "retry_count": 3,
         "model": "tts-1",
     },

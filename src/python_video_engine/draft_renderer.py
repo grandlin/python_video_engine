@@ -13,11 +13,12 @@ DEFAULT_CANVAS_HEIGHT=1920
 DEFAULT_FPS=30.0
 DEFAULT_DRAFT_VERSION="6.0.0"
 SENTENCE_PUNCTUATION="，。！？；：,.!?、"
-EN_MAX_CHARS_PER_LINE=50
-EN_MAX_WORDS_PER_LINE=10
+EN_MAX_CHARS_PER_LINE=40
+EN_MAX_WORDS_PER_LINE=8
 EN_FONT_SIZE_MAX=7.0
-EN_FONT_SIZE_MIN=5.5
+EN_FONT_SIZE_MIN=5.0
 EN_FONT_SIZE_STEP_DOWN=0.35
+ZH_MAX_CHARS_PER_LINE=15
 EN_SECOND_LINE_SHRINK_THRESHOLD=80
 EN_WORD_PATTERN=re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
 EN_SPLIT_PATTERN=re.compile(r"[^.!?,;:]+[.!?,;:]?|[^.!?,;:]+$")
@@ -25,9 +26,9 @@ SUBTITLE_POS_X=0.0
 SUBTITLE_POS_Y=-1470.0/DEFAULT_CANVAS_HEIGHT
 SUBTITLE_STROKE_WIDTH=0.8
 SUBTITLE_FONT_NAME="Source Han Sans CN"
-SUBTITLE_TEXTBOX_WIDTH_RATIO=0.86
+SUBTITLE_TEXTBOX_WIDTH_RATIO=0.80
 SUBTITLE_TEXTBOX_HEIGHT_RATIO=0.24
-SUBTITLE_ALIGNMENT_CENTER=1
+SUBTITLE_ALIGNMENT_CENTER=2
 @dataclass(slots=True)
 class DraftRenderResult:
     client_name:str; project_name:str; draft_directory:str; draft_content_path:str; draft_meta_info_path:str; total_duration_seconds:float; video_segment_count:int; subtitle_segment_count:int
@@ -57,11 +58,17 @@ class DraftRenderer:
         sound_maps.append({"id":amid,"is_config_open":False,"type":"stereo"})
         aseg.append({"id":self._uuid(),"material_id":aid,"target_timerange":{"start":0,"duration":at},"source_timerange":{"start":0,"duration":at},"extra_material_refs":[amid],"clip":None,"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":1.0})
         cursor=0
-        for clip in plan.clips:
-            ct=self._seconds_to_ticks(clip.clip_duration_seconds); st=self._seconds_to_ticks(clip.clip_start_seconds); vid=self._uuid(); cid=self._uuid(); sid=self._uuid(); spid=self._uuid()
-            videos.append({"id":vid,"type":"video","path":clip.absolute_path,"name":clip.file_name,"material_name":clip.file_name,"category_id":"local","local_material_id":vid,"duration":ct,"width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT,"has_audio":False})
+        video_durations_ticks=[max(int(x.get("duration_ticks") or 0),1) for x in subs] if subs else []
+        if not video_durations_ticks:
+            video_durations_ticks=[max(self._seconds_to_ticks(c.clip_duration_seconds),1) for c in plan.clips]
+        for i,ct in enumerate(video_durations_ticks):
+            if not plan.clips:
+                break
+            clip=plan.clips[i % len(plan.clips)]
+            st=self._seconds_to_ticks(clip.clip_start_seconds); source_ct=max(self._seconds_to_ticks(clip.clip_duration_seconds),1); vid=self._uuid(); cid=self._uuid(); sid=self._uuid(); spid=self._uuid()
+            videos.append({"id":vid,"type":"video","path":clip.absolute_path,"name":clip.file_name,"material_name":clip.file_name,"category_id":"local","local_material_id":vid,"duration":source_ct,"width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT,"has_audio":False})
             canvases.append({"id":cid,"type":"canvas_color","color":"#000000"}); sound_maps.append({"id":sid,"is_config_open":False,"type":"stereo"}); speeds.append({"id":spid,"mode":0,"speed":1.0,"type":"speed"})
-            vseg.append({"id":self._uuid(),"material_id":vid,"target_timerange":{"start":cursor,"duration":ct},"source_timerange":{"start":st,"duration":ct},"extra_material_refs":[cid,sid,spid],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":1.0,"y":1.0},"transform":{"x":0.0,"y":0.0}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":0.0})
+            vseg.append({"id":self._uuid(),"material_id":vid,"target_timerange":{"start":cursor,"duration":ct},"source_timerange":{"start":st,"duration":min(ct,source_ct)},"extra_material_refs":[cid,sid,spid],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":1.0,"y":1.0},"transform":{"x":0.0,"y":0.0}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":0.0})
             cursor+=ct
         total=max(total,cursor)
         for chunk in subs:
@@ -73,6 +80,7 @@ class DraftRenderer:
         text=str(chunk["text"])
         render_text=str(chunk.get("render_text") or text)
         font_size=float(chunk.get("font_size") or self.subtitle_font_size)
+        font_size=max(5.0,min(7.0,font_size))
         style_range=[0,len(render_text)]
         style={"range":style_range,"size":font_size,"font_name":SUBTITLE_FONT_NAME,"color":"#FFFFFF","stroke_color":"#000000","stroke_width":SUBTITLE_STROKE_WIDTH,"bold":False,"italic":False,"underline":False,"scale":{"x":1.0,"y":1.0},"alignment":SUBTITLE_ALIGNMENT_CENTER}
         content=json.dumps({"text":render_text,"styles":[style],"paragraphs":[{"range":style_range,"alignment":SUBTITLE_ALIGNMENT_CENTER,"line_break":True}],"bounding_box":{"width_ratio":SUBTITLE_TEXTBOX_WIDTH_RATIO,"height_ratio":SUBTITLE_TEXTBOX_HEIGHT_RATIO},"wrap":True,"auto_scale":True},ensure_ascii=False)
@@ -86,61 +94,96 @@ class DraftRenderer:
             raw_slices=self._split_english_by_words(script_text) if lang.startswith('en') else self._split_chinese(script_text)
         if not raw_slices: return []
         prepared=[self._prepare_subtitle_layout(text,lang) for text in raw_slices]
+        truth_ms=self._resolve_truth_durations_ms(result,len(prepared))
+        if truth_ms:
+            start_ms=0; out=[]
+            for i,chunk in enumerate(prepared):
+                dur_ms=max(int(truth_ms[i]),1)
+                start=round(start_ms/1000.0,3); dur=round(dur_ms/1000.0,3)
+                item={**chunk,"char_count":len(str(chunk["text"])),"start_seconds":start,"duration_seconds":dur,"start_ticks":int(round(start*1000))*1000,"duration_ticks":dur_ms*1000}; out.append(item)
+                start_ms+=dur_ms
+                logger.info("[DraftRenderer][Subtitle] chunk=%s render=%s chars=%s start=%.3fs duration=%.3fs font=%.2f",chunk["text"],chunk.get("render_text"),len(str(chunk["text"])),start,dur,float(chunk.get("font_size") or self.subtitle_font_size))
+            return out
         weights=[self._chunk_weight(str(x["text"])) for x in prepared]; total=sum(weights) or 1.0; cursor=0.0; out=[]
-        use_precise=len(result.subtitle_durations_ms)==len(prepared)
-        precise_ms=[max(int(v),1) for v in result.subtitle_durations_ms] if use_precise else []
-        cursor_ms=0
         for i,chunk in enumerate(prepared):
-            if use_precise:
-                dur_ms=precise_ms[i]
-                start=round(cursor_ms/1000.0,3)
-                dur=round(dur_ms/1000.0,3)
-                cursor_ms+=dur_ms
-            else:
-                dur=round(audio_duration_seconds*(weights[i]/total),3)
-                if i==len(prepared)-1: dur=round(max(audio_duration_seconds-cursor,0.0),3)
-            if not use_precise:
-                start=round(cursor,3); cursor=round(cursor+dur,3)
+            dur=round(audio_duration_seconds*(weights[i]/total),3)
+            if i==len(prepared)-1: dur=round(max(audio_duration_seconds-cursor,0.0),3)
+            start=round(cursor,3); cursor=round(cursor+dur,3)
             item={**chunk,"char_count":len(str(chunk["text"])),"start_seconds":start,"duration_seconds":dur,"start_ticks":int(round(start*1000))*1000,"duration_ticks":int(round(dur*1000))*1000}; out.append(item)
             logger.info("[DraftRenderer][Subtitle] chunk=%s render=%s chars=%s start=%.3fs duration=%.3fs font=%.2f",chunk["text"],chunk.get("render_text"),len(str(chunk["text"])),start,dur,float(chunk.get("font_size") or self.subtitle_font_size))
         return out
+
+    def _resolve_truth_durations_ms(self,result:ContentGenerationResult,expected_count:int)->list[int]:
+        if expected_count<=0:
+            return []
+        paths=[str(p) for p in getattr(result,"subtitle_audio_paths",[]) if str(p).strip()]
+        if len(paths)!=expected_count:
+            if len(result.subtitle_durations_ms)==expected_count:
+                return [max(int(x),1) for x in result.subtitle_durations_ms]
+            return []
+        out=[]
+        warned=False
+        for p in paths:
+            try:
+                import audioop  # noqa: F401
+                from pydub import AudioSegment
+
+                seg=AudioSegment.from_file(p)
+                out.append(max(int(round(seg.duration_seconds*1000.0)),1))
+            except Exception as exc:
+                if not warned:
+                    warned=True
+                    logger.warning("[DraftRenderer] pydub 不可用，真值回退到 subtitle_durations_ms。请确保入口处已注入 audioop 兼容层（可在 .env 设置 AUDIOOP_COMPAT_MODULE）。详情: %s", exc)
+                if len(result.subtitle_durations_ms)==expected_count:
+                    return [max(int(x),1) for x in result.subtitle_durations_ms]
+                return []
+        return out
     def _prepare_subtitle_layout(self,text:str,lang:str)->dict[str,object]:
-        raw=text.strip()
-        if not raw: return {"text":"","render_text":"","font_size":self.subtitle_font_size}
+        raw=self._clean_subtitle_text(text.strip())
+        if not raw:
+            return {"text":"","render_text":"","font_size":self.subtitle_font_size}
+        render_text=self.format_subtitle(raw,lang)
         if lang.startswith('en'):
-            render_text=self._wrap_english_subtitle(raw)
             font_size=self._resolve_english_font_size(render_text)
             return {"text":raw,"render_text":render_text,"font_size":font_size}
-        return {"text":raw,"render_text":raw,"font_size":self.subtitle_font_size}
-    def _wrap_english_subtitle(self,text:str)->str:
-        normalized=' '.join(text.split())
-        if not normalized: return text
-        words=normalized.split(' ')
-        if len(words)<=EN_MAX_WORDS_PER_LINE and len(normalized)<=EN_MAX_CHARS_PER_LINE: return normalized
-        best_idx=0; best_score:tuple[int,int]|None=None
-        for idx in range(1,len(words)):
-            left=' '.join(words[:idx]); right=' '.join(words[idx:])
-            if not left or not right: continue
-            score=(abs(len(left)-len(right)),max(len(left),len(right)))
-            left_words=idx; right_words=len(words)-idx
-            if left_words>EN_MAX_WORDS_PER_LINE or right_words>EN_MAX_WORDS_PER_LINE: continue
-            if len(left)>EN_MAX_CHARS_PER_LINE or len(right)>EN_MAX_CHARS_PER_LINE: continue
-            if best_score is None or score<best_score:
-                best_score=score; best_idx=idx
-        if best_idx:
-            return ' '.join(words[:best_idx])+"\\n"+' '.join(words[best_idx:])
+        zh_font=max(5.0,min(7.0,float(self.subtitle_font_size)))
+        return {"text":raw,"render_text":render_text,"font_size":round(zh_font,2)}
 
-    def _find_wrap_position(self,text:str)->int|None:
+    def format_subtitle(self,text:str,lang:str)->str:
+        return self.split_text_to_lines(text,lang)
+
+    def split_text_to_lines(self,text:str,lang:str)->str:
+        if lang.startswith('en'):
+            normalized=' '.join(text.split())
+            if not normalized:
+                return text
+            return self._split_english_line_by_center_space(normalized)
+        normalized=text.strip()
+        if not normalized or len(normalized)<=ZH_MAX_CHARS_PER_LINE:
+            return normalized or text
+        center=len(normalized)//2
+        return normalized[:center]+"\n"+normalized[center:]
+
+    def _split_english_line_by_center_space(self,text:str)->str:
+        words=text.split(' ')
+        if len(words)<=EN_MAX_WORDS_PER_LINE and len(text)<=EN_MAX_CHARS_PER_LINE:
+            return text
         midpoint=len(text)//2
-        spaces=[i for i,ch in enumerate(text) if ch==' '] 
-        if not spaces: return None
+        spaces=[i for i,ch in enumerate(text) if ch==' ']
+        if not spaces:
+            return text
         valid=[i for i in spaces if i<=EN_MAX_CHARS_PER_LINE and len(text)-i-1<=EN_MAX_CHARS_PER_LINE]
-        pool=valid or spaces
-        return min(pool,key=lambda i: abs(i-midpoint))
+        candidates=valid or spaces
+        split_at=min(candidates,key=lambda i: abs(i-midpoint))
+        left=text[:split_at].strip()
+        right=text[split_at+1:].strip()
+        if not left or not right:
+            return text
+        return left+"\n"+right
 
     def _resolve_english_font_size(self,render_text:str)->float:
-        longest=max((len(line.strip()) for line in render_text.split('\\n')),default=0)
-        total_chars=len(render_text.replace('\\n',''))
+        longest=max((len(line.strip()) for line in render_text.split('\n')),default=0)
+        total_chars=len(render_text.replace('\n',''))
         font_size=min(float(self.subtitle_font_size),EN_FONT_SIZE_MAX)
         if longest>EN_MAX_CHARS_PER_LINE*0.9 or total_chars>EN_SECOND_LINE_SHRINK_THRESHOLD:
             steps=max(1,(total_chars-EN_SECOND_LINE_SHRINK_THRESHOLD+9)//10) if total_chars>EN_SECOND_LINE_SHRINK_THRESHOLD else 1
@@ -224,6 +267,15 @@ class DraftRenderer:
             else:
                 merged.append(chunk)
         return merged
+
+    def _clean_subtitle_text(self,text:str)->str:
+        if not text:
+            return ""
+        cleaned=text.replace("\\n", " ").replace("\\r", " ")
+        cleaned=cleaned.replace("/n", " ").replace("/r", " ")
+        cleaned=re.sub(r"\s+"," ",cleaned).strip()
+        cleaned=cleaned.strip("，。！？；：,.!?、;:·…—- ")
+        return cleaned
 
     def _chunk_weight(self,text:str)->float:
         base=len(re.sub(r"\\s+","",text)); punct=sum(1 for ch in text if ch in SENTENCE_PUNCTUATION)*2
