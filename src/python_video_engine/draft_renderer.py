@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json,logging,re,uuid
+import json,logging,random,re,uuid,shutil
 from dataclasses import dataclass
 from datetime import datetime,timezone
 from pathlib import Path
@@ -33,49 +33,70 @@ SUBTITLE_ALIGNMENT_CENTER=2
 class DraftRenderResult:
     client_name:str; project_name:str; draft_directory:str; draft_content_path:str; draft_meta_info_path:str; total_duration_seconds:float; video_segment_count:int; subtitle_segment_count:int
 class DraftRenderer:
-    def __init__(self, project_root: str | Path | None = None)->None:
+    def __init__(self, project_root: str | Path | None = None, draft_box_path: str | Path | None = None)->None:
         if not logging.getLogger().handlers: logging.basicConfig(level=logging.INFO,format="%(message)s")
         self._project_root=Path(project_root).expanduser().resolve(strict=False) if project_root else Path(__file__).resolve().parents[2]
         self.output_root=self._project_root/"output_drafts"; self.output_root.mkdir(parents=True,exist_ok=True)
+        self.draft_box_path=Path(draft_box_path).expanduser().resolve(strict=False) if draft_box_path else None
+        self.audio_storage_dir=self._get_audio_storage_dir()
         self.subtitle_min_chars=int(get_config_value("subtitle","min_chars",default=8) or 8)
         self.subtitle_max_chars=int(get_config_value("subtitle","max_chars",default=14) or 14)
         self.subtitle_font_size=int(get_config_value("subtitle","font_size",default=11) or 11)
+        self._random=random.Random()
+    def _get_audio_storage_dir(self)->Path:
+        if self.draft_box_path and self.draft_box_path.exists():
+            audio_dir=self.draft_box_path/"环球出海音频暂存"
+            audio_dir.mkdir(parents=True,exist_ok=True)
+            return audio_dir
+        return self.output_root
     def render(self,assembly_plan:AssemblyPlan,content_result:ContentGenerationResult)->DraftRenderResult:
-        name=f"{assembly_plan.client_name}_AI初稿"; draft_dir=self.output_root/name; draft_dir.mkdir(parents=True,exist_ok=True)
-        subs=self._build_subtitle_chunks(content_result); self._post_validate_subtitle_texts(content_result.script_text,subs,content_result.script_language)
-        content=self._build_draft_content(assembly_plan,content_result,subs)
+        ts=datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+        name=f"{assembly_plan.client_name}_AI初稿_{ts}"; draft_dir=self.output_root/name; draft_dir.mkdir(parents=True,exist_ok=True)
+        audio_src=Path(content_result.audio_path).resolve(strict=False)
+        if not audio_src.exists():
+            raise RuntimeError(f"音频源文件不存在: {audio_src}")
+        audio_filename=f"audio_{ts}.mp3"
+        audio_dst=self.audio_storage_dir/audio_filename
+        shutil.copy2(str(audio_src),str(audio_dst))
+        if not audio_dst.exists() or audio_dst.stat().st_size<=0:
+            raise RuntimeError(f"音频文件复制失败: {audio_dst}")
+        logger.info("[DraftRenderer] 音频文件已复制到固定目录: %s (大小: %s bytes)",audio_dst,audio_dst.stat().st_size)
+        content_result.audio_path=str(audio_dst)
+        subs=[]
+        content=self._build_draft_content(assembly_plan,content_result,subs,draft_dir,audio_filename)
         meta=self._build_draft_meta_info(assembly_plan,content_result,name,subs)
         cp=draft_dir/"draft_content.json"; mp=draft_dir/"draft_meta_info.json"
         cp.write_text(json.dumps(content,ensure_ascii=False,indent=2),encoding="utf-8")
         mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding="utf-8")
         logger.info("[DraftRenderer] 草稿文件已生成: %s",cp); logger.info("[DraftRenderer] 草稿文件已生成: %s",mp)
-        return DraftRenderResult(assembly_plan.client_name,name,str(draft_dir),str(cp),str(mp),assembly_plan.total_audio_duration_seconds,len(assembly_plan.clips),len(subs))
-    def _build_draft_content(self,plan:AssemblyPlan,result:ContentGenerationResult,subs:list[dict[str,float|int|str]])->dict[str,object]:
+        return DraftRenderResult(assembly_plan.client_name,name,str(draft_dir),str(cp),str(mp),assembly_plan.total_audio_duration_seconds,len(assembly_plan.clips),0)
+    def _build_draft_content(self,plan:AssemblyPlan,result:ContentGenerationResult,subs:list[dict[str,float|int|str]],draft_dir:Path,audio_filename:str)->dict[str,object]:
         ap=Path(result.audio_path).resolve(strict=False); ai=self._read_audio_info(ap); at=self._seconds_to_ticks(ai["duration_seconds"]); total=max(self._seconds_to_ticks(plan.total_audio_duration_seconds),at)
+        audio_absolute_path=str(ap)
         videos=[]; audios=[]; texts=[]; canvases=[]; sound_maps=[]; speeds=[]; vseg=[]; aseg=[]; tseg=[]
         aid=self._uuid(); amid=self._uuid()
-        audios.append({"id":aid,"type":"music","path":str(ap),"name":ap.name,"material_name":ap.name,"category_id":"local","local_material_id":aid,"duration":at,"has_audio":True,"wave_points":[]})
+        audios.append({"id":aid,"type":"music","path":audio_absolute_path,"name":ap.name,"material_name":ap.name,"category_id":"local","local_material_id":aid,"duration":at,"has_audio":True,"wave_points":[]})
         sound_maps.append({"id":amid,"is_config_open":False,"type":"stereo"})
         aseg.append({"id":self._uuid(),"material_id":aid,"target_timerange":{"start":0,"duration":at},"source_timerange":{"start":0,"duration":at},"extra_material_refs":[amid],"clip":None,"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":1.0})
         cursor=0
-        video_durations_ticks=[max(int(x.get("duration_ticks") or 0),1) for x in subs] if subs else []
+        video_durations_ticks=[]
         if not video_durations_ticks:
             video_durations_ticks=[max(self._seconds_to_ticks(c.clip_duration_seconds),1) for c in plan.clips]
         for i,ct in enumerate(video_durations_ticks):
             if not plan.clips:
                 break
             clip=plan.clips[i % len(plan.clips)]
-            st=self._seconds_to_ticks(clip.clip_start_seconds); source_ct=max(self._seconds_to_ticks(clip.clip_duration_seconds),1); vid=self._uuid(); cid=self._uuid(); sid=self._uuid(); spid=self._uuid()
+            max_shift=max(min(clip.clip_duration_seconds*0.12,0.18),0.0)
+            random_shift=self._random.uniform(0.0,max_shift) if max_shift>0 else 0.0
+            shifted_start=max(clip.clip_start_seconds+random_shift,0.0)
+            st=self._seconds_to_ticks(shifted_start); source_ct=max(self._seconds_to_ticks(clip.clip_duration_seconds),1); vid=self._uuid(); cid=self._uuid(); sid=self._uuid(); spid=self._uuid()
+            scale_x=round(self._random.uniform(1.02,1.10),4); scale_y=scale_x
             videos.append({"id":vid,"type":"video","path":clip.absolute_path,"name":clip.file_name,"material_name":clip.file_name,"category_id":"local","local_material_id":vid,"duration":source_ct,"width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT,"has_audio":False})
             canvases.append({"id":cid,"type":"canvas_color","color":"#000000"}); sound_maps.append({"id":sid,"is_config_open":False,"type":"stereo"}); speeds.append({"id":spid,"mode":0,"speed":1.0,"type":"speed"})
-            vseg.append({"id":self._uuid(),"material_id":vid,"target_timerange":{"start":cursor,"duration":ct},"source_timerange":{"start":st,"duration":min(ct,source_ct)},"extra_material_refs":[cid,sid,spid],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":1.0,"y":1.0},"transform":{"x":0.0,"y":0.0}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":0.0})
+            vseg.append({"id":self._uuid(),"material_id":vid,"target_timerange":{"start":cursor,"duration":ct},"source_timerange":{"start":st,"duration":min(ct,source_ct)},"extra_material_refs":[cid,sid,spid],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":scale_x,"y":scale_y},"transform":{"x":0.0,"y":0.0}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":0.0})
             cursor+=ct
         total=max(total,cursor)
-        for chunk in subs:
-            tid=self._uuid(); tt=int(chunk.get("duration_ticks") or self._seconds_to_ticks(float(chunk["duration_seconds"]))); ts=int(chunk.get("start_ticks") or self._seconds_to_ticks(float(chunk["start_seconds"])))
-            texts.append(self._build_text_material(tid,chunk))
-            tseg.append({"id":self._uuid(),"material_id":tid,"target_timerange":{"start":ts,"duration":tt},"source_timerange":{"start":0,"duration":tt},"extra_material_refs":[],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":1.0,"y":1.0},"transform":{"x":SUBTITLE_POS_X,"y":SUBTITLE_POS_Y}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True})
-        return {"id":self._uuid(),"name":f"{plan.client_name}_AI初稿","duration":total,"fps":DEFAULT_FPS,"color_space":0,"canvas_config":{"ratio":"9:16","width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT},"config":{"maintrack_adsorb":True,"material_save_mode":0,"subtitle_sync":True,"lyrics_sync":False,"video_mute":False},"keyframes":{"adjusts":[],"audios":[],"effects":[],"filters":[],"texts":[],"videos":[]},"materials":{"videos":videos,"audios":audios,"texts":texts,"canvases":canvases,"effects":[],"transitions":[],"video_effects":[],"sound_channel_mappings":sound_maps,"speeds":speeds,"audio_fades":[]},"tracks":[{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"视频主轨","type":"video","segments":vseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"音频轨","type":"audio","segments":aseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"字幕轨","type":"text","segments":tseg}],"platform":{"os":"windows","app":"jianying_pro"},"version":DEFAULT_DRAFT_VERSION,"created_at":self._now_iso(),"updated_at":self._now_iso()}
+        return {"id":self._uuid(),"name":f"{plan.client_name}_AI初稿","duration":total,"fps":DEFAULT_FPS,"color_space":0,"canvas_config":{"ratio":"9:16","width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT},"config":{"maintrack_adsorb":True,"material_save_mode":0,"subtitle_sync":True,"lyrics_sync":False,"video_mute":False},"keyframes":{"adjusts":[],"audios":[],"effects":[],"filters":[],"texts":[],"videos":[]},"materials":{"videos":videos,"audios":audios,"texts":texts,"canvases":canvases,"effects":[],"transitions":[],"video_effects":[],"sound_channel_mappings":sound_maps,"speeds":speeds,"audio_fades":[]},"tracks":[{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"视频主轨","type":"video","segments":vseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"音频轨","type":"audio","segments":aseg}],"platform":{"os":"windows","app":"jianying_pro"},"version":DEFAULT_DRAFT_VERSION,"created_at":self._now_iso(),"updated_at":self._now_iso()}
     def _build_text_material(self,tid:str,chunk:dict[str,float|int|str])->dict[str,object]:
         text=str(chunk["text"])
         render_text=str(chunk.get("render_text") or text)

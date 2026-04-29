@@ -1,7 +1,11 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -16,7 +20,7 @@ from mutagen.mp3 import MP3
 from moviepy.editor import AudioFileClip, concatenate_audioclips
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
 
-from .network import ProxySettings, build_httpx_client, check_tcp_connectivity
+from .network import ProxySettings, build_httpx_client, check_tcp_connectivity, append_log_line, diagnose_url_connectivity
 
 from .runtime_config import get_config_value, get_enabled_voices, get_runtime_config
 
@@ -66,7 +70,7 @@ class ContentGenerationResult:
 
 
 class ContentGenerator:
-    def __init__(self, voice_key: str = DEFAULT_VOICE_KEY, target_language: str = SCRIPT_LANGUAGE_ZH) -> None:
+    def __init__(self, voice_key: str = DEFAULT_VOICE_KEY, target_language: str = SCRIPT_LANGUAGE_ZH, target_duration: str = '30-60', random_seed: int | None = None) -> None:
         if not logging.getLogger().handlers:
             logging.basicConfig(level=logging.INFO, format="%(message)s")
         self._load_runtime_env()
@@ -84,6 +88,7 @@ class ContentGenerator:
             self.voice_key = voice_key
         self.voice = self.voice_library.get(self.voice_key, self.voice_key if self.voice_key.startswith("en-") else DEFAULT_PROVIDER_VOICE)
         self.target_language = target_language if target_language in {SCRIPT_LANGUAGE_ZH, SCRIPT_LANGUAGE_EN} else SCRIPT_LANGUAGE_ZH
+        self.target_duration = target_duration if target_duration in {'15-30', '30-60'} else '30-60'
 
         self.temp_assets_dir = self._project_root() / "temp_assets"
         self.temp_assets_dir.mkdir(parents=True, exist_ok=True)
@@ -108,6 +113,9 @@ class ContentGenerator:
         self.tts_model = str(get_config_value("tts", "model", default="tts-1")).strip() or "tts-1"
         self._tts_server_checked = False
         self._pydub_warned = False
+        self._random = random.Random(random_seed)
+        self._dedupe_state_path = self._project_root() / ".python_video_engine_generation_state.json"
+        self._generation_state = self._load_generation_state()
 
     def generate(self, base_path: str | Path, client_name: str, keywords: list[str]) -> ContentGenerationResult:
         resolved_base_path = Path(base_path).expanduser().resolve(strict=False)
@@ -120,12 +128,17 @@ class ContentGenerator:
 
         script_structure = self._generate_script(client_name=client_name, keywords=effective_keywords)
         script_text = script_structure["script_for_tts"]
+        self._remember_opening(script_text, self.target_language)
+        script_hash = self._script_hash(script_text)
+        self._generation_state["last_script_hash"] = script_hash
+        self._save_generation_state()
         if self.translation_enabled:
             logger.info("[ContentGenerator] translation_enabled=true，但当前版本已屏蔽翻译调用")
 
         audio_path = self._build_audio_output_path(client_name=client_name)
-        subtitle_units = self._split_script_into_units(script_text, self.target_language)
-        subtitle_durations_ms, subtitle_audio_paths = self._generate_audio_by_units(subtitle_units, self.voice, audio_path)
+        rate, pitch = self._next_tts_variation()
+        logger.info("[ContentGenerator] 一次性生成完整音频: rate=%.3f pitch=%.3f", rate, pitch)
+        self.generate_voice(script_text, self.voice, audio_path, rate=rate, pitch=pitch)
         self._ensure_valid_audio_file(audio_path)
         audio_duration_seconds = self._resolve_audio_duration(audio_path)
 
@@ -141,9 +154,9 @@ class ContentGenerator:
             tts_provider="worker-tts",
             script_language=self.target_language,
             script_structure=script_structure,
-            subtitle_units=subtitle_units,
-            subtitle_durations_ms=subtitle_durations_ms,
-            subtitle_audio_paths=subtitle_audio_paths,
+            subtitle_units=[],
+            subtitle_durations_ms=[],
+            subtitle_audio_paths=[],
         )
 
     def _split_script_into_units(self, script_text: str, target_language: str) -> list[str]:
@@ -171,7 +184,8 @@ class ContentGenerator:
 
     def _generate_audio_by_units(self, units: list[str], voice_name: str, output_path: Path) -> tuple[list[int], list[str]]:
         if not units:
-            self.generate_voice(text=" ", voice_name=voice_name, output_path=output_path)
+            rate, pitch = self._next_tts_variation()
+            self.generate_voice(text=" ", voice_name=voice_name, output_path=output_path, rate=rate, pitch=pitch)
             self._strip_silence_inplace(output_path)
             return [self._resolve_segment_duration_ms(output_path)], [str(output_path)]
 
@@ -184,7 +198,8 @@ class ContentGenerator:
             for index, unit in enumerate(units):
                 temp_path = output_path.with_name(f"{output_path.stem}_u{index:03d}.mp3")
                 temp_files.append(temp_path)
-                self.generate_voice(text=unit, voice_name=voice_name, output_path=temp_path)
+                rate, pitch = self._next_tts_variation()
+                self.generate_voice(text=unit, voice_name=voice_name, output_path=temp_path, rate=rate, pitch=pitch)
                 self._ensure_valid_audio_file(temp_path)
                 self._strip_silence_inplace(temp_path)
                 durations_ms.append(self._resolve_segment_duration_ms(temp_path))
@@ -207,6 +222,9 @@ class ContentGenerator:
         return durations_ms, [str(x) for x in temp_files]
 
     def _strip_silence_inplace(self, audio_path: Path) -> None:
+        pad_ms = self._random.randint(200, 400)
+        silence_len = self._random.randint(90, 160)
+        thresh_delta = float(self._random.uniform(12.0, 18.0))
         try:
             import audioop  # noqa: F401
             from pydub import AudioSegment
@@ -214,13 +232,13 @@ class ContentGenerator:
 
             segment = AudioSegment.from_file(str(audio_path))
             dbfs = float(segment.dBFS) if segment.dBFS != float("-inf") else -40.0
-            trimmed = strip_silence(segment, silence_len=120, silence_thresh=dbfs - 16.0, padding=80)
+            trimmed = strip_silence(segment, silence_len=silence_len, silence_thresh=dbfs - thresh_delta, padding=pad_ms)
             if len(trimmed) <= 0:
                 trimmed = segment
             trimmed.export(str(audio_path), format="mp3")
             return
         except Exception as exc:
-            if self._try_strip_silence_ffmpeg(audio_path):
+            if self._try_strip_silence_ffmpeg(audio_path, pad_ms=pad_ms):
                 if not self._pydub_warned:
                     self._pydub_warned = True
                     logger.warning("[ContentGenerator] pydub/audioop 不可用，已自动回退 ffmpeg silenceremove。详情: %s", exc)
@@ -231,9 +249,10 @@ class ContentGenerator:
             else:
                 logger.warning("[ContentGenerator] strip_silence 失败，回退原音频: %s", exc)
 
-    def _try_strip_silence_ffmpeg(self, audio_path: Path) -> bool:
+    def _try_strip_silence_ffmpeg(self, audio_path: Path, pad_ms: int = 280) -> bool:
         temp_path = audio_path.with_name(f"{audio_path.stem}.trimmed{audio_path.suffix}")
-        filter_arg = "silenceremove=start_periods=1:start_duration=0.12:start_threshold=-40dB:stop_periods=-1:stop_duration=0.12:stop_threshold=-40dB"
+        pad = max(int(pad_ms), 0) / 1000.0
+        filter_arg = f"silenceremove=start_periods=1:start_duration=0.10:start_threshold=-40dB:stop_periods=-1:stop_duration=0.10:stop_threshold=-40dB:start_silence={pad:.3f}:stop_silence={pad:.3f}"
         cmd = [
             self._resolve_ffmpeg_executable(),
             "-y",
@@ -244,7 +263,7 @@ class ContentGenerator:
             str(temp_path),
         ]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
             ok = proc.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0
             if not ok:
                 if temp_path.exists():
@@ -293,7 +312,7 @@ class ContentGenerator:
             str(audio_path),
         ]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
             if proc.returncode != 0:
                 return None
             value = (proc.stdout or "").strip()
@@ -311,9 +330,11 @@ class ContentGenerator:
             return ffmpeg_exe[:-6] + "ffprobe"
         return "ffprobe"
 
-    def generate_voice(self, text: str, voice_name: str, output_path: Path) -> None:
+    def generate_voice(self, text: str, voice_name: str, output_path: Path, rate: float | None = None, pitch: float | None = None) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"input": text, "voice": voice_name, "model": self.tts_model}
+        if rate is None or pitch is None:
+            rate, pitch = self._next_tts_variation()
+        payload = {"input": text, "voice": voice_name, "model": self.tts_model, "rate": float(rate), "pitch": float(pitch)}
         headers = {"Content-Type": "application/json"}
         last_error: Exception | None = None
         if not self._tts_server_checked and not self.proxy_settings.use_proxy:
@@ -333,7 +354,21 @@ class ContentGenerator:
                 last_error = RuntimeError(f"TTS 网络请求异常，第 {attempt}/{self.tts_max_retries} 次重试失败: {exc}")
             if attempt < self.tts_max_retries:
                 time.sleep(1.5 * attempt)
-        raise RuntimeError("配音服务连接失败，已自动重试多次仍未成功。" f"\n接口：{self.tts_api_url}" f"\n详情：{last_error}" "\n请检查代理软件是否开启，或尝试更换代理节点（推荐使用日本或新加坡节点）。")
+        diag_text = ""
+        try:
+            diag_text = diagnose_url_connectivity(self.tts_api_url, timeout_seconds=6.0, proxy_settings=self.proxy_settings)
+            append_log_line("TTS failure diagnostics:\n" + diag_text)
+        except Exception:
+            diag_text = "(diagnose failed)"
+
+        raise RuntimeError(
+            "配音服务连接失败，已自动重试多次仍未成功。"
+            f"\n接口：{self.tts_api_url}"
+            f"\n详情：{last_error}"
+            "\n\n—— 网络自检（请把这一段截图/复制发我）——\n"
+            + diag_text
+            + "\n\n建议：1）确认代理软件对本程序生效；2）若公司网络拦截 workers.dev，请换网络或让网管放行；3）尝试更换代理节点（日本/新加坡常见更稳）。"
+        )
 
     def _generate_script(self, client_name: str, keywords: list[str]) -> dict[str, str]:
         if self.target_language == SCRIPT_LANGUAGE_EN:
@@ -344,24 +379,35 @@ class ContentGenerator:
 
     def _generate_llm_script_zh(self, client_name: str, keywords: list[str]) -> str:
         keyword_text = self._keywords_to_prompt_text(keywords)
+        min_len, max_len = self._random_length_range(script_language=SCRIPT_LANGUAGE_ZH)
+        style = self._next_narrative_style(script_language=SCRIPT_LANGUAGE_ZH)
+        opening_guard = self._next_opening_guard(script_language=SCRIPT_LANGUAGE_ZH)
+        target_time = '25~45秒' if self.target_duration == '15-30' else '50~90秒'
         prompt = (
             f"请根据 keywords.txt 的业务关键词，为客户“{client_name}”创作一段中文工厂宣传口播稿。"
             f"关键词全文（请完整吸收，不要只挑少量词）：{keyword_text}。"
-            "要求：1. 110~150 字；2. 口语化但不空泛，避免口水话和万能套话；"
-            "3. 必须体现具体业务信息：至少包含产品/工艺、品质控制、交付/服务中的两项；"
-            "4. 每次生成都要有明显差异化表达与不同叙事角度；"
-            "5. 不要标题、不要分点、不要引号，只输出文案正文。"
+            f"要求：1. 字数 {min_len}~{max_len} 字；2. 叙述角度必须使用“{style}”；"
+            f"3. 预计口播时长控制在 {target_time}；"
+            "4. 口语化但不空泛，避免口水话和万能套话；"
+            "5. 必须体现具体业务信息：至少包含产品/工艺、品质控制、交付/服务中的两项；"
+            f"6. 开头第一句话严禁使用这些开头：{opening_guard}；"
+            "7. 不要标题、不要分点、不要引号，只输出文案正文。"
         )
         return self._request_llm(system_prompt=self.llm_system_prompt, user_prompt=prompt)
 
     def _generate_llm_script_en(self, client_name: str, keywords: list[str]) -> str:
         keyword_text = self._keywords_to_prompt_text(keywords)
+        min_len, max_len = self._random_length_range(script_language=SCRIPT_LANGUAGE_EN)
+        style = self._next_narrative_style(script_language=SCRIPT_LANGUAGE_EN)
+        opening_guard = self._next_opening_guard(script_language=SCRIPT_LANGUAGE_EN)
+        target_time = '25-45 seconds' if self.target_duration == '15-30' else '50-90 seconds'
         prompt = (
             f"Based on the full business keywords from keywords.txt for client '{client_name}', write an English factory promo voiceover script. "
             f"Keywords (use comprehensively): {keyword_text}. "
-            "Requirements: 110-150 words, no Chinese characters, no bullet points, no title, no quotation marks, "
-            "avoid filler language, include concrete business details about product/process, quality control, and delivery/service. "
-            "Use a clearly different angle each time."
+            f"Requirements: {min_len}-{max_len} words, estimated speaking length {target_time}, perspective must be '{style}', no Chinese characters, no bullet points, no title, no quotation marks, "
+            "avoid filler language, include concrete details about product/process, quality control, and delivery/service. "
+            f"The opening sentence must not reuse these openings: {opening_guard}. "
+            "Use clearly different tone and first sentence from previous generation."
         )
         for attempt in range(1, 4):
             content = self._request_llm(system_prompt=ENGLISH_SYSTEM_PROMPT, user_prompt=prompt)
@@ -502,6 +548,95 @@ class ContentGenerator:
         safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in client_name).strip("_")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return self.temp_assets_dir / f"{safe or 'client'}_{ts}.mp3"
+
+    def _random_length_range(self, script_language: str) -> tuple[int, int]:
+        if self.target_duration == '15-30':
+            if script_language == SCRIPT_LANGUAGE_EN:
+                low = self._random.randint(60, 80)
+                high = self._random.randint(max(low + 5, 85), 100)
+                return low, high
+            low = self._random.randint(50, 70)
+            high = self._random.randint(max(low + 5, 75), 90)
+            return low, high
+        else:
+            if script_language == SCRIPT_LANGUAGE_EN:
+                low = self._random.randint(135, 165)
+                high = self._random.randint(max(low + 8, 170), 190)
+                return low, high
+            low = self._random.randint(120, 145)
+            high = self._random.randint(max(low + 8, 150), 175)
+            return low, high
+
+    def _next_narrative_style(self, script_language: str) -> str:
+        state = self._generation_state
+        if script_language == SCRIPT_LANGUAGE_EN:
+            styles = [
+                "professional capability introduction",
+                "customer testimonial perspective",
+                "factory tour walkthrough",
+                "quality assurance deep-dive",
+                "delivery and service story",
+            ]
+        else:
+            styles = ["专业介绍视角", "客户好评视角", "工厂实地探访视角", "品质管控拆解视角", "交付与服务案例视角"]
+        idx = int(state.get("style_idx", -1)) + 1
+        state["style_idx"] = idx % len(styles)
+        return styles[state["style_idx"]]
+
+    def _next_opening_guard(self, script_language: str) -> str:
+        state = self._generation_state
+        key = "opening_history_en" if script_language == SCRIPT_LANGUAGE_EN else "opening_history_zh"
+        history = list(state.get(key, [])) if isinstance(state.get(key, []), list) else []
+        history = [str(x).strip() for x in history if str(x).strip()][:6]
+        if not history:
+            fallback = ["Welcome to", "Our factory", "At our plant"] if script_language == SCRIPT_LANGUAGE_EN else ["欢迎来到", "我们是一家", "在这里"]
+            return " / ".join(fallback)
+        return " / ".join(history)
+
+    def _remember_opening(self, text: str, script_language: str) -> None:
+        sentence = self._first_sentence(text)
+        if not sentence:
+            return
+        key = "opening_history_en" if script_language == SCRIPT_LANGUAGE_EN else "opening_history_zh"
+        history = list(self._generation_state.get(key, [])) if isinstance(self._generation_state.get(key, []), list) else []
+        sentence = sentence[:48]
+        if sentence in history:
+            history.remove(sentence)
+        history.insert(0, sentence)
+        self._generation_state[key] = history[:6]
+        self._save_generation_state()
+
+    def _first_sentence(self, text: str) -> str:
+        normalized = " ".join(str(text).split()).strip()
+        if not normalized:
+            return ""
+        parts = re.split(r"[。！？.!?]", normalized, maxsplit=1)
+        return parts[0].strip() if parts else normalized
+
+    def _script_hash(self, text: str) -> str:
+        return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _load_generation_state(self) -> dict[str, object]:
+        default = {"style_idx": -1, "opening_history_zh": [], "opening_history_en": [], "last_script_hash": ""}
+        try:
+            if self._dedupe_state_path.exists():
+                payload = json.loads(self._dedupe_state_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    default.update(payload)
+        except Exception:
+            pass
+        return default
+
+    def _save_generation_state(self) -> None:
+        try:
+            self._dedupe_state_path.write_text(json.dumps(self._generation_state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _next_tts_variation(self) -> tuple[float, float]:
+        rate = round(self._random.uniform(0.95, 1.10), 3)
+        pitch = round(self._random.uniform(-1.5, 1.5), 3)
+        return rate, pitch
 
     def _load_runtime_env(self) -> None:
         candidates: list[Path] = []

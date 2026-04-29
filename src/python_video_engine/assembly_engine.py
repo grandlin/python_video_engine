@@ -192,7 +192,13 @@ class AssemblyEngine:
             if not cycle:
                 used.clear()
                 cycle = list(pool)
-            self._random.shuffle(cycle)
+            if cycle:
+                min_used = min(self._usage_counts.get(m.absolute_path, 0) for m in cycle)
+                low_usage = [m for m in cycle if self._usage_counts.get(m.absolute_path, 0) == min_used]
+                other_usage = [m for m in cycle if self._usage_counts.get(m.absolute_path, 0) != min_used]
+                self._random.shuffle(low_usage)
+                self._random.shuffle(other_usage)
+                cycle = low_usage + other_usage
             remaining.extend(cycle)
 
         if not remaining:
