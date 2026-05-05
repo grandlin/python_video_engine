@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-import argparse,json,os,shutil,socket,sys,threading,tkinter as tk
+import argparse,json,os,shutil,socket,sys,threading,tkinter as tk,logging
 import subprocess
 from dataclasses import asdict
 from datetime import datetime
@@ -7,6 +7,17 @@ from pathlib import Path
 from pprint import pprint
 from tkinter import filedialog,messagebox,ttk
 from dotenv import load_dotenv
+
+# 配置日志输出到控制台
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 def _install_audioop_compat() -> None:
@@ -106,7 +117,21 @@ def load_settings():
     except Exception:return {}
 def save_settings(d): SETTINGS.write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding='utf-8')
 def infer_client_name(p): return Path(p).expanduser().resolve(strict=False).name.strip() or CLIENT
-def check_material(p): return [x for x in ['01_工厂全景与大环境','02_机器运转与加工细节','03_成品展示与发货'] if not (Path(p)/x).exists()]
+def check_material(p):
+    base = Path(p).expanduser().resolve(strict=False)
+    if not base.exists() or not base.is_dir():
+        return ['素材目录不存在或不可访问']
+
+    required = ['01_工厂全景与大环境', '02_机器运转与加工细节', '03_成品展示与发货']
+    has_all_required_dirs = all((base / name).is_dir() for name in required)
+    if has_all_required_dirs:
+        return []
+
+    has_any_mp4 = any(x.is_file() and x.suffix.lower() == '.mp4' for x in base.rglob('*'))
+    if has_any_mp4:
+        return []
+
+    return ['未检测到可用 mp4 素材（可使用三分类目录，或直接在单目录放 mp4）']
 def resolve_target_language_by_voice_label(label:str)->str: return 'en' if label in EN_VOICES else 'zh'
 def resolve_target_language_by_voice_key(key:str)->str: return 'en' if str(key).startswith('en-') else 'zh'
 def move_draft(src,dst_root):
@@ -122,7 +147,7 @@ def run_pipeline_mix(base_path,client_name,target_duration_seconds=30,output_dir
         fetch=MaterialFetcher().fetch(base_path=base_path,client_name=client_name)
         if progress: progress(20+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：素材扫描完成，共 {len(fetch.materials)} 条，开始组装片段...')
         duration_with_variance=target_duration_seconds+random.uniform(-3,3)
-        plan=AssemblyEngine(random_seed=video_idx).assemble(base_path=base_path,client_name=client_name,audio_duration_seconds=duration_with_variance,materials=fetch.materials)
+        plan=AssemblyEngine(random_seed=(video_idx+1)*1009).assemble(base_path=base_path,client_name=client_name,audio_duration_seconds=duration_with_variance,materials=fetch.materials)
         if progress: progress(60+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：片段组装完成，开始导出 MP4...')
         exporter=VideoExporter(output_dir=output_dir)
         export_result=exporter.export(assembly_plan=plan,video_index=video_idx+1)
@@ -145,7 +170,7 @@ def run_pipeline_mix(base_path,client_name,target_duration_seconds=30,output_dir
             if progress: progress(5+video_idx*90//video_count,error_msg)
             raise RuntimeError(error_msg)
         if progress: progress(45+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：配音完成，开始组装片段...')
-        plan=AssemblyEngine(random_seed=video_idx).assemble(base_path=base_path,client_name=client_name,audio_duration_seconds=content.audio_duration_seconds,materials=fetch.materials)
+        plan=AssemblyEngine(random_seed=(video_idx+1)*1009).assemble(base_path=base_path,client_name=client_name,audio_duration_seconds=content.audio_duration_seconds,materials=fetch.materials)
         if progress: progress(70+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：片段组装完成，开始生成剪映草稿...')
         draft=DraftRenderer(draft_box_path=draft_box).render(assembly_plan=plan,content_result=content)
         if progress: progress(85+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：草稿已生成，正在移动到剪映草稿箱...')
@@ -275,8 +300,15 @@ class App:
 def parse_args():
     p=argparse.ArgumentParser(description='Run local auto-edit pipeline'); p.add_argument('--base-path',default=BASE); p.add_argument('--client-name',default=CLIENT); p.add_argument('--voice',default='female_standard'); p.add_argument('--draft-box-path',default=''); p.add_argument('--json',dest='json_output',action='store_true'); p.add_argument('--gui',action='store_true'); return p.parse_args()
 def main():
+    logger.info("=" * 60)
+    logger.info("剪映自动剪辑工具 v0.1.2")
+    logger.info("=" * 60)
     a=parse_args(); cfg=load_settings(); draft=a.draft_box_path or cfg.get('draft_box_path','')
-    if a.gui or len(sys.argv)==1: App().run(); return
+    if a.gui or len(sys.argv)==1:
+        logger.info("启动 GUI 模式...")
+        App().run()
+        return
+    logger.info("启动 CLI 模式...")
     lang=resolve_target_language_by_voice_key(a.voice)
     r=run_pipeline(Path(a.base_path),a.client_name,a.voice,Path(draft) if draft else None,target_language=lang)
     if a.json_output: print(json.dumps(r,ensure_ascii=False))

@@ -192,6 +192,7 @@ class AssemblyEngine:
             if not cycle:
                 used.clear()
                 cycle = list(pool)
+
             if cycle:
                 min_used = min(self._usage_counts.get(m.absolute_path, 0) for m in cycle)
                 low_usage = [m for m in cycle if self._usage_counts.get(m.absolute_path, 0) == min_used]
@@ -199,6 +200,14 @@ class AssemblyEngine:
                 self._random.shuffle(low_usage)
                 self._random.shuffle(other_usage)
                 cycle = low_usage + other_usage
+
+                # 尽量避免每条视频开头重复用上一次视频的素材
+                if len(self._video_unique_paths) < 2:
+                    non_overlap = [m for m in cycle if m.absolute_path not in self._last_video_paths]
+                    overlap = [m for m in cycle if m.absolute_path in self._last_video_paths]
+                    if non_overlap:
+                        cycle = non_overlap + overlap
+
             remaining.extend(cycle)
 
         if not remaining:

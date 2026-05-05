@@ -26,6 +26,7 @@ MATERIAL_CATEGORIES = {
 }
 
 IGNORED_FOLDER_NAME = "04_人物实拍（老板&工人）"
+FALLBACK_CATEGORY = "machine"
 
 logger = logging.getLogger("python_video_engine.material_fetcher")
 
@@ -67,17 +68,26 @@ class MaterialFetcher:
         if ignored_folder_path.exists():
             logger.info("[MaterialFetcher] 主动忽略人物文件夹: %s", ignored_folder_path)
 
-        for category, folder_name in MATERIAL_CATEGORIES.items():
-            folder_path = resolved_base_path / folder_name
-            category_materials = self._scan_category(category=category, folder_path=folder_path)
-            materials.extend(category_materials)
-            counts_by_category[category] = len(category_materials)
-            logger.info(
-                "[MaterialFetcher] 分类扫描完成: category=%s folder=%s count=%s",
-                category,
-                folder_name,
-                len(category_materials),
-            )
+        has_all_category_dirs = all((resolved_base_path / folder_name).is_dir() for folder_name in MATERIAL_CATEGORIES.values())
+
+        if has_all_category_dirs:
+            for category, folder_name in MATERIAL_CATEGORIES.items():
+                folder_path = resolved_base_path / folder_name
+                category_materials = self._scan_category(category=category, folder_path=folder_path)
+                materials.extend(category_materials)
+                counts_by_category[category] = len(category_materials)
+                logger.info(
+                    "[MaterialFetcher] 分类扫描完成: category=%s folder=%s count=%s",
+                    category,
+                    folder_name,
+                    len(category_materials),
+                )
+        else:
+            logger.info("[MaterialFetcher] 检测到单目录素材模式，按统一素材池扫描 mp4")
+            pool_materials = self._scan_single_pool(folder_path=resolved_base_path)
+            materials.extend(pool_materials)
+            counts_by_category[FALLBACK_CATEGORY] = len(pool_materials)
+            logger.info("[MaterialFetcher] 单目录扫描完成: count=%s", len(pool_materials))
 
         logger.info(
             "[MaterialFetcher] 扫描完成: keywords=%s total_videos=%s",
@@ -146,6 +156,24 @@ class MaterialFetcher:
 
         logger.info("[MaterialFetcher] 发现 mp4 素材: category=%s count=%s", category, len(mp4_files))
         return [self._extract_video_metadata(category=category, file_path=file_path) for file_path in mp4_files]
+
+    def _scan_single_pool(self, folder_path: Path) -> list[MaterialFileMeta]:
+        if not folder_path.exists() or not folder_path.is_dir():
+            logger.info("[MaterialFetcher] 单目录素材路径不可用: path=%s", folder_path)
+            return []
+
+        mp4_files = [
+            path
+            for path in folder_path.rglob("*")
+            if path.is_file() and path.suffix.lower() == ".mp4" and IGNORED_FOLDER_NAME not in path.parts
+        ]
+        random.shuffle(mp4_files)
+        if not mp4_files:
+            logger.info("[MaterialFetcher] 单目录下无 mp4 素材: path=%s", folder_path)
+            return []
+
+        logger.info("[MaterialFetcher] 单目录发现 mp4 素材: count=%s", len(mp4_files))
+        return [self._extract_video_metadata(category=FALLBACK_CATEGORY, file_path=file_path) for file_path in mp4_files]
 
     def _extract_video_metadata(self, category: str, file_path: Path) -> MaterialFileMeta:
         logger.info("[MaterialFetcher] 提取视频元数据: %s", file_path)

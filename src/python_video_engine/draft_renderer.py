@@ -63,6 +63,107 @@ class DraftRenderer:
         logger.info("[DraftRenderer] 音频文件已复制到固定目录: %s (大小: %s bytes)",audio_dst,audio_dst.stat().st_size)
         content_result.audio_path=str(audio_dst)
         subs=[]
+        content=self._build_single_timeline_draft(assembly_plan,content_result,subs)
+        meta=self._build_draft_meta_info(assembly_plan,content_result,name,subs)
+        cp=draft_dir/"draft_content.json"; mp=draft_dir/"draft_meta_info.json"
+        cp.write_text(json.dumps(content,ensure_ascii=False,indent=2),encoding="utf-8")
+        mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding="utf-8")
+        logger.info("[DraftRenderer] 草稿文件已生成: %s",cp); logger.info("[DraftRenderer] 草稿文件已生成: %s",mp)
+        return DraftRenderResult(assembly_plan.client_name,name,str(draft_dir),str(cp),str(mp),assembly_plan.total_audio_duration_seconds,len(assembly_plan.clips),0)
+
+    def _build_single_timeline_draft(self,plan:AssemblyPlan,result:ContentGenerationResult,subs:list)->dict:
+        ap=Path(result.audio_path).resolve(strict=False); ai=self._read_audio_info(ap); at=self._seconds_to_ticks(ai["duration_seconds"]); total=max(self._seconds_to_ticks(plan.total_audio_duration_seconds),at)
+        audio_absolute_path=str(ap)
+        videos=[]; audios=[]; canvases=[]; sound_maps=[]; speeds=[]; vseg=[]; aseg=[]
+        aid=self._uuid(); amid=self._uuid()
+        audios.append({"id":aid,"type":"music","path":audio_absolute_path,"name":ap.name,"material_name":ap.name,"category_id":"local","local_material_id":aid,"duration":at,"has_audio":True,"wave_points":[]})
+        sound_maps.append({"id":amid,"is_config_open":False,"type":"stereo"})
+        aseg.append({"id":self._uuid(),"material_id":aid,"target_timerange":{"start":0,"duration":at},"source_timerange":{"start":0,"duration":at},"extra_material_refs":[amid],"clip":None,"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":1.0})
+        cursor=0
+        video_durations_ticks=[max(self._seconds_to_ticks(c.clip_duration_seconds),1) for c in plan.clips]
+        for i,ct in enumerate(video_durations_ticks):
+            if not plan.clips: break
+            clip=plan.clips[i % len(plan.clips)]
+            max_shift=max(min(clip.clip_duration_seconds*0.12,0.18),0.0)
+            random_shift=self._random.uniform(0.0,max_shift) if max_shift>0 else 0.0
+            shifted_start=max(clip.clip_start_seconds+random_shift,0.0)
+            st=self._seconds_to_ticks(shifted_start); source_ct=max(self._seconds_to_ticks(clip.clip_duration_seconds),1); vid=self._uuid(); cid=self._uuid(); sid=self._uuid(); spid=self._uuid()
+            scale_x=round(self._random.uniform(1.02,1.10),4); scale_y=scale_x
+            videos.append({"id":vid,"type":"video","path":clip.absolute_path,"name":clip.file_name,"material_name":clip.file_name,"category_id":"local","local_material_id":vid,"duration":source_ct,"width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT,"has_audio":False})
+            canvases.append({"id":cid,"type":"canvas_color","color":"#000000"}); sound_maps.append({"id":sid,"is_config_open":False,"type":"stereo"}); speeds.append({"id":spid,"mode":0,"speed":1.0,"type":"speed"})
+            vseg.append({"id":self._uuid(),"material_id":vid,"target_timerange":{"start":cursor,"duration":ct},"source_timerange":{"start":st,"duration":min(ct,source_ct)},"extra_material_refs":[cid,sid,spid],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":scale_x,"y":scale_y},"transform":{"x":0.0,"y":0.0}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":0.0})
+            cursor+=ct
+        total=max(total,cursor)
+        return {"id":self._uuid(),"new_version":"","name":f"{plan.client_name}_AI初稿","duration":total,"fps":DEFAULT_FPS,"color_space":0,"canvas_config":{"ratio":"9:16","width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT},"config":{"maintrack_adsorb":True,"material_save_mode":0,"subtitle_sync":True,"lyrics_sync":False,"video_mute":False},"keyframes":{"adjusts":[],"audios":[],"effects":[],"filters":[],"texts":[],"videos":[]},"materials":{"videos":videos,"audios":audios,"texts":[],"canvases":canvases,"effects":[],"transitions":[],"video_effects":[],"sound_channel_mappings":sound_maps,"speeds":speeds,"audio_fades":[]},"tracks":[{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"视频主轨","type":"video","segments":vseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"音频轨","type":"audio","segments":aseg}],"platform":{"os":"windows","app":"jianying_pro"},"last_modified_platform":{"os":"windows","app":"jianying_pro"},"version":DEFAULT_DRAFT_VERSION,"path":"","uneven_animation_template_info":{},"smart_ads_info":{},"function_assistant_info":{"fps":{}},"created_at":self._now_iso(),"updated_at":self._now_iso()}
+
+    def render_multiple_timelines(self,assembly_plans:list[AssemblyPlan],content_results:list[ContentGenerationResult],client_name:str)->DraftRenderResult:
+        import time
+        ts=datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+        name=f"{client_name}_AI初稿_{ts}"
+        draft_dir=self.output_root/name
+        draft_dir.mkdir(parents=True,exist_ok=True)
+
+        timelines_dir=draft_dir/"Timelines"
+        timelines_dir.mkdir(parents=True,exist_ok=True)
+
+        project_id=self._uuid()
+        timeline_infos=[]
+        timeline_ids=[]
+        timeline_names=[]
+        create_time=int(time.time()*1000000)
+
+        for idx,(plan,result) in enumerate(zip(assembly_plans,content_results),1):
+            timeline_id=self._uuid().upper()
+            timeline_name=f"时间线{idx:02d}"
+            timeline_dir=timelines_dir/timeline_id
+            timeline_dir.mkdir(parents=True,exist_ok=True)
+            (timeline_dir/"common_attachment").mkdir(parents=True,exist_ok=True)
+
+            audio_src=Path(result.audio_path).resolve(strict=False)
+            if not audio_src.exists():
+                raise RuntimeError(f"音频源文件不存在: {audio_src}")
+            audio_filename=f"audio_{ts}_{idx}.mp3"
+            audio_dst=self.audio_storage_dir/audio_filename
+            shutil.copy2(str(audio_src),str(audio_dst))
+            if not audio_dst.exists() or audio_dst.stat().st_size<=0:
+                raise RuntimeError(f"音频文件复制失败: {audio_dst}")
+            logger.info("[DraftRenderer] 时间线%d 音频已复制: %s",idx,audio_dst)
+            result.audio_path=str(audio_dst)
+
+            timeline_content=self._build_single_timeline_draft(plan,result,[])
+            timeline_content_path=timeline_dir/"draft_content.json"
+            timeline_content_path.write_text(json.dumps(timeline_content,ensure_ascii=False,indent=2),encoding="utf-8")
+
+            timeline_infos.append({"create_time":create_time+idx,"id":timeline_id,"is_marked_delete":False,"name":timeline_name,"update_time":create_time+idx})
+            timeline_ids.append(timeline_id)
+            timeline_names.append(timeline_name)
+
+        project_json={"config":{"color_space":-1,"render_index_track_mode_on":False,"use_float_render":False},"create_time":create_time,"id":project_id,"main_timeline_id":timeline_ids[0] if timeline_ids else "","timelines":timeline_infos,"update_time":create_time,"version":0}
+        (timelines_dir/"project.json").write_text(json.dumps(project_json,ensure_ascii=False,indent=2),encoding="utf-8")
+
+        timeline_layout={"dockItems":[{"dockIndex":0,"ratio":1,"timelineIds":timeline_ids,"timelineNames":timeline_names}],"layoutOrientation":1}
+        (draft_dir/"timeline_layout.json").write_text(json.dumps(timeline_layout,ensure_ascii=False,indent=2),encoding="utf-8")
+
+        meta=self._build_multi_timeline_meta(client_name,name,assembly_plans,content_results)
+        (draft_dir/"draft_meta_info.json").write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding="utf-8")
+
+        logger.info("[DraftRenderer] 多时间线草稿已生成: %s (共%d条时间线)",draft_dir,len(timeline_ids))
+
+        total_clips=sum(len(p.clips) for p in assembly_plans)
+        return DraftRenderResult(client_name,name,str(draft_dir),str(draft_dir/"Timelines"/timeline_ids[0]/"draft_content.json"),str(draft_dir/"draft_meta_info.json"),assembly_plans[0].total_audio_duration_seconds if assembly_plans else 0,total_clips,0)
+        ts=datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+        name=f"{assembly_plan.client_name}_AI初稿_{ts}"; draft_dir=self.output_root/name; draft_dir.mkdir(parents=True,exist_ok=True)
+        audio_src=Path(content_result.audio_path).resolve(strict=False)
+        if not audio_src.exists():
+            raise RuntimeError(f"音频源文件不存在: {audio_src}")
+        audio_filename=f"audio_{ts}.mp3"
+        audio_dst=self.audio_storage_dir/audio_filename
+        shutil.copy2(str(audio_src),str(audio_dst))
+        if not audio_dst.exists() or audio_dst.stat().st_size<=0:
+            raise RuntimeError(f"音频文件复制失败: {audio_dst}")
+        logger.info("[DraftRenderer] 音频文件已复制到固定目录: %s (大小: %s bytes)",audio_dst,audio_dst.stat().st_size)
+        content_result.audio_path=str(audio_dst)
+        subs=[]
         content=self._build_draft_content(assembly_plan,content_result,subs,draft_dir,audio_filename)
         meta=self._build_draft_meta_info(assembly_plan,content_result,name,subs)
         cp=draft_dir/"draft_content.json"; mp=draft_dir/"draft_meta_info.json"
@@ -70,7 +171,37 @@ class DraftRenderer:
         mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding="utf-8")
         logger.info("[DraftRenderer] 草稿文件已生成: %s",cp); logger.info("[DraftRenderer] 草稿文件已生成: %s",mp)
         return DraftRenderResult(assembly_plan.client_name,name,str(draft_dir),str(cp),str(mp),assembly_plan.total_audio_duration_seconds,len(assembly_plan.clips),0)
-    def _build_draft_content(self,plan:AssemblyPlan,result:ContentGenerationResult,subs:list[dict[str,float|int|str]],draft_dir:Path,audio_filename:str)->dict[str,object]:
+    def _build_timeline_content(self,plan:AssemblyPlan,result:ContentGenerationResult,timeline_idx:int,all_videos:dict,all_audios:dict,all_canvases:dict,all_sound_maps:dict,all_speeds:dict)->dict:
+        ap=Path(result.audio_path).resolve(strict=False); ai=self._read_audio_info(ap); at=self._seconds_to_ticks(ai["duration_seconds"])
+        audio_absolute_path=str(ap)
+        vseg=[]; aseg=[]
+
+        aid=self._uuid(); amid=self._uuid()
+        all_audios[aid]={"id":aid,"type":"music","path":audio_absolute_path,"name":ap.name,"material_name":ap.name,"category_id":"local","local_material_id":aid,"duration":at,"has_audio":True,"wave_points":[]}
+        all_sound_maps[amid]={"id":amid,"is_config_open":False,"type":"stereo"}
+        aseg.append({"id":self._uuid(),"material_id":aid,"target_timerange":{"start":0,"duration":at},"source_timerange":{"start":0,"duration":at},"extra_material_refs":[amid],"clip":None,"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":1.0})
+
+        cursor=0
+        video_durations_ticks=[max(self._seconds_to_ticks(c.clip_duration_seconds),1) for c in plan.clips]
+        for i,ct in enumerate(video_durations_ticks):
+            if not plan.clips: break
+            clip=plan.clips[i % len(plan.clips)]
+            max_shift=max(min(clip.clip_duration_seconds*0.12,0.18),0.0)
+            random_shift=self._random.uniform(0.0,max_shift) if max_shift>0 else 0.0
+            shifted_start=max(clip.clip_start_seconds+random_shift,0.0)
+            st=self._seconds_to_ticks(shifted_start); source_ct=max(self._seconds_to_ticks(clip.clip_duration_seconds),1)
+            vid=self._uuid(); cid=self._uuid(); sid=self._uuid(); spid=self._uuid()
+            scale_x=round(self._random.uniform(1.02,1.10),4); scale_y=scale_x
+
+            all_videos[vid]={"id":vid,"type":"video","path":clip.absolute_path,"name":clip.file_name,"material_name":clip.file_name,"category_id":"local","local_material_id":vid,"duration":source_ct,"width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT,"has_audio":False}
+            all_canvases[cid]={"id":cid,"type":"canvas_color","color":"#000000"}
+            all_sound_maps[sid]={"id":sid,"is_config_open":False,"type":"stereo"}
+            all_speeds[spid]={"id":spid,"mode":0,"speed":1.0,"type":"speed"}
+            vseg.append({"id":self._uuid(),"material_id":vid,"target_timerange":{"start":cursor,"duration":ct},"source_timerange":{"start":st,"duration":min(ct,source_ct)},"extra_material_refs":[cid,sid,spid],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":scale_x,"y":scale_y},"transform":{"x":0.0,"y":0.0}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":0.0})
+            cursor+=ct
+
+        total=max(at,cursor)
+        return {"id":self._uuid(),"name":f"时间线{timeline_idx:02d}","duration":total,"tracks":[{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"视频主轨","type":"video","segments":vseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"音频轨","type":"audio","segments":aseg}]}
         ap=Path(result.audio_path).resolve(strict=False); ai=self._read_audio_info(ap); at=self._seconds_to_ticks(ai["duration_seconds"]); total=max(self._seconds_to_ticks(plan.total_audio_duration_seconds),at)
         audio_absolute_path=str(ap)
         videos=[]; audios=[]; texts=[]; canvases=[]; sound_maps=[]; speeds=[]; vseg=[]; aseg=[]; tseg=[]
@@ -324,3 +455,10 @@ class DraftRenderer:
     def _seconds_to_ticks(self,seconds:float)->int: return max(int(round(max(seconds,0.0)*JY_TICKS_PER_SECOND)),0)
     def _uuid(self)->str: return str(uuid.uuid4())
     def _now_iso(self)->str: return datetime.now(timezone.utc).isoformat()
+
+    def _build_multi_timeline_draft(self,client_name:str,timelines:list,all_videos:dict,all_audios:dict,all_canvases:dict,all_sound_maps:dict,all_speeds:dict)->dict:
+        max_duration=max((t["duration"] for t in timelines),default=0)
+        return {"id":self._uuid(),"name":f"{client_name}_AI初稿","duration":max_duration,"fps":DEFAULT_FPS,"color_space":0,"canvas_config":{"ratio":"9:16","width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT},"config":{"maintrack_adsorb":True,"material_save_mode":0,"subtitle_sync":True,"lyrics_sync":False,"video_mute":False},"keyframes":{"adjusts":[],"audios":[],"effects":[],"filters":[],"texts":[],"videos":[]},"materials":{"videos":list(all_videos.values()),"audios":list(all_audios.values()),"texts":[],"canvases":list(all_canvases.values()),"effects":[],"transitions":[],"video_effects":[],"sound_channel_mappings":list(all_sound_maps.values()),"speeds":list(all_speeds.values()),"audio_fades":[]},"timelines":timelines,"platform":{"os":"windows","app":"jianying_pro"},"version":DEFAULT_DRAFT_VERSION,"created_at":self._now_iso(),"updated_at":self._now_iso()}
+
+    def _build_multi_timeline_meta(self,client_name:str,project_name:str,plans:list[AssemblyPlan],results:list[ContentGenerationResult])->dict:
+        return {"draft_name":project_name,"draft_id":self._uuid(),"draft_version":DEFAULT_DRAFT_VERSION,"timeline_count":len(plans),"timelines":[{"index":i+1,"client_name":p.client_name,"audio_path":r.audio_path,"video_count":len(p.clips),"duration":p.total_audio_duration_seconds} for i,(p,r) in enumerate(zip(plans,results))],"created_at":self._now_iso(),"updated_at":self._now_iso()}
