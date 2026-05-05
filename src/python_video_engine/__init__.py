@@ -9,6 +9,7 @@ from .material_fetcher import (
     MaterialFetchResult,
 )
 from .runtime_config import DEFAULT_REMOTE_CONFIG_URL, get_config_value, get_runtime_config
+from .video_exporter import VideoExporter, VideoExportResult
 
 __all__ = [
     "AssemblyClip",
@@ -28,4 +29,6 @@ __all__ = [
     "DEFAULT_REMOTE_CONFIG_URL",
     "get_config_value",
     "get_runtime_config",
+    "VideoExporter",
+    "VideoExportResult",
 ]
