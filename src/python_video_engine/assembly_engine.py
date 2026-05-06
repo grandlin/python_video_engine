@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -347,8 +348,24 @@ class AssemblyEngine:
         }
         try:
             state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._hide_file_if_windows(state_path)
         except Exception as exc:
             logger.warning("[Assembly] 保存素材使用状态失败: %s", exc)
+
+    def _hide_file_if_windows(self, path: Path) -> None:
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+            if attrs == -1:
+                return
+            hidden_attr = 0x2
+            if attrs & hidden_attr:
+                return
+            ctypes.windll.kernel32.SetFileAttributesW(str(path), attrs | hidden_attr)
+        except Exception:
+            pass
 
     def _compute_last_video_overlap_ratio(self) -> float:
         current = len(self._video_unique_paths)

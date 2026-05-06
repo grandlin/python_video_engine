@@ -54,6 +54,36 @@ _install_audioop_compat()
 from src.python_video_engine import AssemblyEngine,ContentGenerator,DraftRenderer,MaterialFetcher,VideoExporter
 from src.python_video_engine.network import ProxySettings, check_tcp_connectivity, get_default_log_dir
 
+
+def _build_scan_progress_adapter(progress, video_idx: int, video_count: int):
+    if not progress:
+        return None
+
+    def _cb(done: int, total: int, current: str) -> None:
+        if total <= 0:
+            return
+        ratio = done / total
+        stage_value = 8 + int(ratio * 12)
+        stage_value = max(8, min(24, stage_value))
+        progress(stage_value + video_idx * 90 // video_count, f"第 {video_idx+1}/{video_count} 个：正在扫描素材 {done}/{total}（{current}）")
+
+    return _cb
+
+def _build_precheck_progress_adapter(progress, video_idx: int, video_count: int):
+    if not progress:
+        return None
+
+    def _cb(done: int, total: int, current: str) -> None:
+        if total <= 0:
+            return
+        ratio = done / total
+        stage_value = 62 + int(ratio * 18)
+        stage_value = max(62, min(80, stage_value))
+        progress(stage_value + video_idx * 90 // video_count, f"第 {video_idx+1}/{video_count} 个：预检片段可读性 {done}/{total}（{current}）")
+
+    return _cb
+
+
 def _load_env_for_runtime() -> None:
     candidates: list[Path] = []
     meipass = getattr(sys, "_MEIPASS", None)
@@ -116,6 +146,71 @@ def load_settings():
     try:return json.loads(SETTINGS.read_text(encoding='utf-8')) if SETTINGS.exists() else {}
     except Exception:return {}
 def save_settings(d): SETTINGS.write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding='utf-8')
+
+def _upsert_bad_materials(base_path: Path, bad_paths: list[str], reason: str, detail: str) -> None:
+    if not bad_paths:
+        return
+    state_path = base_path / '.python_video_engine_bad_materials.json'
+    payload = {}
+    if state_path.exists():
+        try:
+            payload = json.loads(state_path.read_text(encoding='utf-8'))
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+
+    now = datetime.now().isoformat(timespec='seconds')
+    hard_reasons = {'nal_error', 'aac_decode_error', 'timeout_error'}
+
+    for raw in bad_paths:
+        key = str(Path(raw).resolve(strict=False))
+        prev = payload.get(key, {}) if isinstance(payload, dict) else {}
+
+        prev_soft = int(prev.get('soft_failures', 0) or 0)
+        soft_failures = prev_soft + 1
+
+        if reason in hard_reasons:
+            effective_reason = reason
+        elif reason == 'decode_error':
+            effective_reason = 'decode_error' if soft_failures >= 3 else 'transient_error'
+        else:
+            effective_reason = reason
+
+        payload[key] = {
+            'reason': effective_reason,
+            'detail': detail[:500],
+            'first_seen': str(prev.get('first_seen', now)),
+            'last_seen': now,
+            'failures': int(prev.get('failures', 0) or 0) + 1,
+            'soft_failures': soft_failures,
+        }
+
+    state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def _rehabilitate_transient_blacklist(base_path: Path) -> None:
+    state_path = base_path / '.python_video_engine_bad_materials.json'
+    if not state_path.exists():
+        return
+    try:
+        payload = json.loads(state_path.read_text(encoding='utf-8'))
+        if not isinstance(payload, dict):
+            return
+    except Exception:
+        return
+
+    changed = False
+    for key, record in list(payload.items()):
+        if not isinstance(record, dict):
+            continue
+        reason = str(record.get('reason', '')).strip().lower()
+        if reason == 'decode_error' and int(record.get('soft_failures', 0) or 0) < 3:
+            record['reason'] = 'transient_error'
+            changed = True
+
+    if changed:
+        state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
 def infer_client_name(p): return Path(p).expanduser().resolve(strict=False).name.strip() or CLIENT
 def check_material(p):
     base = Path(p).expanduser().resolve(strict=False)
@@ -141,18 +236,35 @@ def move_draft(src,dst_root):
     return moved_dst
 def run_pipeline_mix(base_path,client_name,target_duration_seconds=30,output_dir=None,progress=None,video_count=1):
     import time,random
+    _rehabilitate_transient_blacklist(Path(base_path))
     results=[]
     for video_idx in range(video_count):
         if progress: progress(5+video_idx*90//video_count,f'开始生成第 {video_idx+1}/{video_count} 个混剪视频...')
-        fetch=MaterialFetcher().fetch(base_path=base_path,client_name=client_name)
-        if progress: progress(20+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：素材扫描完成，共 {len(fetch.materials)} 条，开始组装片段...')
+        fetch=MaterialFetcher(progress_callback=_build_scan_progress_adapter(progress, video_idx, video_count)).fetch(base_path=base_path,client_name=client_name)
+        if progress: progress(24+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：素材扫描完成，可用 {len(fetch.materials)} 条，开始组装片段...')
         duration_with_variance=target_duration_seconds+random.uniform(-3,3)
         plan=AssemblyEngine(random_seed=(video_idx+1)*1009).assemble(base_path=base_path,client_name=client_name,audio_duration_seconds=duration_with_variance,materials=fetch.materials)
         if progress: progress(60+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：片段组装完成，开始导出 MP4...')
         exporter=VideoExporter(output_dir=output_dir)
-        export_result=exporter.export(assembly_plan=plan,video_index=video_idx+1)
+        if progress: progress(62+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：开始预检片段可读性...')
+        checked_plan, pre_skipped_files = exporter.precheck_plan_clips(plan, progress_callback=_build_precheck_progress_adapter(progress, video_idx, video_count))
+        if pre_skipped_files:
+            checked_paths = {c.absolute_path for c in checked_plan.clips}
+            pre_bad_paths = [c.absolute_path for c in plan.clips if c.absolute_path not in checked_paths]
+            _upsert_bad_materials(Path(base_path), pre_bad_paths, reason='decode_error', detail='precheck failed: NAL/decode/AAC error')
+        if not checked_plan.clips:
+            raise RuntimeError(f'第 {video_idx+1}/{video_count} 个：预检后无可用片段，已跳过该视频。请检查素材质量。')
+        if pre_skipped_files and progress:
+            progress(80+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：预检已跳过 {len(pre_skipped_files)} 个异常片段，继续导出')
+        export_result=exporter.export(assembly_plan=checked_plan,video_index=video_idx+1)
+        if export_result.blacklisted_paths:
+            _upsert_bad_materials(Path(base_path), export_result.blacklisted_paths, reason='timeout_error', detail='export timed out >15s, auto-skip source file')
+        total_skipped_files = sorted(set(pre_skipped_files + (export_result.skipped_files or [])))
+        total_skipped_count = len(total_skipped_files)
+        if total_skipped_count > 0 and progress:
+            progress(86+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：已跳过 {total_skipped_count} 个异常片段，继续导出')
         if progress: progress(90+video_idx*90//video_count,f'第 {video_idx+1}/{video_count} 个：MP4 导出完成')
-        results.append({'output_path':export_result.output_path,'duration_seconds':export_result.duration_seconds,'clip_count':export_result.clip_count,'video_index':video_idx+1})
+        results.append({'output_path':export_result.output_path,'duration_seconds':export_result.duration_seconds,'clip_count':export_result.clip_count,'video_index':video_idx+1,'skipped_clip_count':total_skipped_count,'skipped_files':total_skipped_files})
         if video_idx<video_count-1:
             time.sleep(2)
     if progress: progress(100,f'全部完成：已成功生成 {video_count} 个混剪视频')
@@ -292,9 +404,21 @@ class App:
     def _ok_mix(self,r):
         self._set_busy(False); self._set_progress(100,f'已完成：已生成 {len(r)} 个混剪视频')
         self.script.set('混剪模式：无文案')
-        outputs='\n'.join([f"视频 {i+1}: {item.get('output_path','')} (时长: {item.get('duration_seconds',0):.1f}秒, 片段数: {item.get('clip_count',0)})" for i,item in enumerate(r)])
+        outputs='\n'.join([f"视频 {i+1}: {item.get('output_path','')} (时长: {item.get('duration_seconds',0):.1f}秒, 片段数: {item.get('clip_count',0)}, 跳过: {item.get('skipped_clip_count',0)})" for i,item in enumerate(r)])
         self.output.set(outputs)
-        messagebox.showinfo('完成',f'已成功生成 {len(r)} 个混剪视频。')
+
+        total_skipped=sum(int(item.get('skipped_clip_count',0) or 0) for item in r)
+        skipped_files=[]
+        for item in r:
+            skipped_files.extend(item.get('skipped_files',[]) or [])
+        skipped_files=sorted(set(skipped_files))
+
+        if total_skipped>0:
+            preview='、'.join(skipped_files[:5]) if skipped_files else '（文件名不可用）'
+            suffix='...' if len(skipped_files)>5 else ''
+            messagebox.showwarning('完成（已剔除坏素材）',f'已成功生成 {len(r)} 个混剪视频。\n已剔除坏素材：{preview}{suffix}\n共剔除 {total_skipped} 个异常片段。')
+        else:
+            messagebox.showinfo('完成',f'已成功生成 {len(r)} 个混剪视频。')
     def _fail(self,msg): self._set_busy(False); self.status.set('生成失败，请检查路径、网络或素材结构'); self.output.set(msg); self.script.set('生成失败。'); self.progress_text.set('失败'); messagebox.showerror('生成失败',msg)
     def run(self): self.root.mainloop()
 def parse_args():
