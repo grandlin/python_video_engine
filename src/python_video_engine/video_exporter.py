@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from .assembly_engine import AssemblyPlan
+from .ffmpeg_runtime import get_ffmpeg_path, get_ffprobe_path
 
 logger = logging.getLogger("python_video_engine.video_exporter")
 
@@ -57,7 +58,7 @@ class VideoExporter:
         if not assembly_plan.clips:
             raise ValueError("AssemblyPlan 中没有视频片段，无法导出")
 
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = get_ffmpeg_path()
         if not ffmpeg:
             raise RuntimeError("未找到 ffmpeg，可执行导出中止")
 
@@ -195,7 +196,7 @@ class VideoExporter:
             return False, False
 
     def _is_clip_readable(self, path: str) -> bool:
-        ffprobe = shutil.which("ffprobe")
+        ffprobe = get_ffprobe_path()
         if not ffprobe:
             return True
 
@@ -217,7 +218,7 @@ class VideoExporter:
             return False
 
     def _can_decode_clip_range(self, path: str, start_seconds: float) -> bool:
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = get_ffmpeg_path()
         if not ffmpeg:
             return True
 
@@ -238,7 +239,7 @@ class VideoExporter:
             return False
 
     def _probe_duration_seconds(self, path: str) -> float:
-        ffprobe = shutil.which("ffprobe")
+        ffprobe = get_ffprobe_path()
         if not ffprobe:
             return 0.0
         cmd = [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", path]

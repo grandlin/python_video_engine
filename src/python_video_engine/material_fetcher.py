@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from moviepy.editor import VideoFileClip
+from .ffmpeg_runtime import get_ffprobe_path
 
 DEFAULT_FACTORY_KEYWORDS = [
     "factory direct",
@@ -29,6 +30,7 @@ FALLBACK_CATEGORY = "machine"
 PROBE_TIMEOUT_SECONDS = 5.0
 BAD_MATERIALS_FILE = ".python_video_engine_bad_materials.json"
 BLACKLIST_REASONS = {"timeout_error", "nal_error", "aac_decode_error"}
+SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
 logger = logging.getLogger("python_video_engine.material_fetcher")
 
 
@@ -83,7 +85,7 @@ class MaterialFetcher:
                 materials.extend(category_materials)
                 counts_by_category[category] = len(category_materials)
         else:
-            logger.info("[MaterialFetcher] 检测到单目录素材模式，按统一素材池扫描 mp4")
+            logger.info("[MaterialFetcher] 检测到单目录素材模式，按统一素材池扫描支持格式视频")
             all_files = self._collect_mp4_files_recursive(resolved_base_path)
             self._prepare_scan_progress(all_files)
             pool_materials = self._scan_single_pool(folder_path=resolved_base_path)
@@ -144,12 +146,12 @@ class MaterialFetcher:
         return result
 
     def _collect_mp4_files_in_dir(self, folder_path: Path) -> list[Path]:
-        return [p for p in folder_path.iterdir() if p.is_file() and p.suffix.lower() == ".mp4"] if folder_path.exists() and folder_path.is_dir() else []
+        return [p for p in folder_path.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_VIDEO_EXTS] if folder_path.exists() and folder_path.is_dir() else []
 
     def _collect_mp4_files_recursive(self, folder_path: Path) -> list[Path]:
         if not folder_path.exists() or not folder_path.is_dir():
             return []
-        return [p for p in folder_path.rglob("*") if p.is_file() and p.suffix.lower() == ".mp4" and IGNORED_FOLDER_NAME not in p.parts]
+        return [p for p in folder_path.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_VIDEO_EXTS and IGNORED_FOLDER_NAME not in p.parts]
 
     def _prepare_scan_progress(self, files: list[Path]) -> None:
         self._scan_total = len(files)
@@ -194,7 +196,7 @@ class MaterialFetcher:
                 clip.close()
 
     def _probe_with_ffprobe(self, file_path: Path) -> tuple[float, int, int] | None:
-        ffprobe = shutil.which("ffprobe")
+        ffprobe = get_ffprobe_path()
         if not ffprobe:
             return None
         cmd = [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration", "-of", "json", str(file_path)]

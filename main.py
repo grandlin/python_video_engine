@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 import argparse,json,os,shutil,socket,sys,threading,tkinter as tk,logging
 import subprocess
+import tempfile
+import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +54,7 @@ def _install_audioop_compat() -> None:
 _install_audioop_compat()
 
 from src.python_video_engine import AssemblyEngine,ContentGenerator,DraftRenderer,MaterialFetcher,VideoExporter
+from src.python_video_engine.ffmpeg_runtime import get_ffmpeg_path, get_ffprobe_path
 from src.python_video_engine.network import ProxySettings, check_tcp_connectivity, get_default_log_dir
 
 
@@ -116,6 +119,9 @@ def _auto_configure_proxy_from_common_ports() -> None:
 
 _load_env_for_runtime()
 _auto_configure_proxy_from_common_ports()
+
+logger.info("[Startup] ffmpeg path: %s", get_ffmpeg_path() or "NOT_FOUND")
+logger.info("[Startup] ffprobe path: %s", get_ffprobe_path() or "NOT_FOUND")
 
 def startup_network_check() -> None:
     settings = ProxySettings.from_env()
@@ -186,7 +192,30 @@ def _upsert_bad_materials(base_path: Path, bad_paths: list[str], reason: str, de
             'soft_failures': soft_failures,
         }
 
-    state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    _safe_write_json_file(state_path, payload)
+
+
+def _safe_write_json_file(path: Path, payload: dict) -> None:
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    last_err: Exception | None = None
+    for _ in range(3):
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=str(parent), prefix=path.name + '.tmp_') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                tmp_path = Path(f.name)
+            os.replace(str(tmp_path), str(path))
+            return
+        except Exception as exc:
+            last_err = exc
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            time.sleep(0.2)
+    logger.warning('[State] 写入状态文件失败，已忽略，不影响主流程: %s err=%s', path, last_err)
 
 
 def _rehabilitate_transient_blacklist(base_path: Path) -> None:
@@ -222,11 +251,12 @@ def check_material(p):
     if has_all_required_dirs:
         return []
 
-    has_any_mp4 = any(x.is_file() and x.suffix.lower() == '.mp4' for x in base.rglob('*'))
-    if has_any_mp4:
+    supported_exts = {'.mp4', '.mov', '.m4v', '.avi', '.mkv'}
+    has_any_video = any(x.is_file() and x.suffix.lower() in supported_exts for x in base.rglob('*'))
+    if has_any_video:
         return []
 
-    return ['未检测到可用 mp4 素材（可使用三分类目录，或直接在单目录放 mp4）']
+    return ['未检测到可用视频素材（支持 .mp4/.mov/.m4v/.avi/.mkv）']
 def resolve_target_language_by_voice_label(label:str)->str: return 'en' if label in EN_VOICES else 'zh'
 def resolve_target_language_by_voice_key(key:str)->str: return 'en' if str(key).startswith('en-') else 'zh'
 def move_draft(src,dst_root):
