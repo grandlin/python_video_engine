@@ -144,13 +144,17 @@ class DraftRenderer:
         timeline_layout={"dockItems":[{"dockIndex":0,"ratio":1,"timelineIds":timeline_ids,"timelineNames":timeline_names}],"layoutOrientation":1}
         (draft_dir/"timeline_layout.json").write_text(json.dumps(timeline_layout,ensure_ascii=False,indent=2),encoding="utf-8")
 
+        if timeline_ids:
+            root_draft_content = (draft_dir/"Timelines"/timeline_ids[0]/"draft_content.json").read_text(encoding="utf-8")
+            (draft_dir/"draft_content.json").write_text(root_draft_content, encoding="utf-8")
+
         meta=self._build_multi_timeline_meta(client_name,name,assembly_plans,content_results)
         (draft_dir/"draft_meta_info.json").write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding="utf-8")
 
         logger.info("[DraftRenderer] 多时间线草稿已生成: %s (共%d条时间线)",draft_dir,len(timeline_ids))
 
         total_clips=sum(len(p.clips) for p in assembly_plans)
-        return DraftRenderResult(client_name,name,str(draft_dir),str(draft_dir/"Timelines"/timeline_ids[0]/"draft_content.json"),str(draft_dir/"draft_meta_info.json"),assembly_plans[0].total_audio_duration_seconds if assembly_plans else 0,total_clips,0)
+        return DraftRenderResult(client_name,name,str(draft_dir),str(draft_dir/"draft_content.json"),str(draft_dir/"draft_meta_info.json"),assembly_plans[0].total_audio_duration_seconds if assembly_plans else 0,total_clips,0)
         ts=datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
         name=f"{assembly_plan.client_name}_AI初稿_{ts}"; draft_dir=self.output_root/name; draft_dir.mkdir(parents=True,exist_ok=True)
         audio_src=Path(content_result.audio_path).resolve(strict=False)
