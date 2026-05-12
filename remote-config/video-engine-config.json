@@ -1,11 +1,11 @@
 {
-  "version": "2026.04.24.1",
+  "version": "2026.05.12.1",
   "llm": {
-    "api_url": "https://api.siliconflow.cn/v1",
-    "model": "Qwen/Qwen2.5-7B-Instruct",
-    "timeout_seconds": 90,
-    "api_key_env": "SILICONFLOW_API_KEY",
-    "requires_api_key": true,
+    "api_url": "https://python-video-engine-57pd.vercel.app/api/chat",
+    "model": "qwen-plus",
+    "timeout_seconds": 120,
+    "api_key_env": "",
+    "requires_api_key": false,
     "system_prompt": "你擅长撰写中文外贸工厂短视频口播文案。",
     "script_language": "zh-CN",
     "translation_enabled": false
@@ -19,15 +19,40 @@
   "voices": {
     "default_label": "温柔女声",
     "items": [
-      { "label": "温柔女声", "key": "female_standard", "provider_voice": "zh-CN-XiaoxiaoNeural", "enabled": true },
-      { "label": "活力男声", "key": "male_dynamic", "provider_voice": "zh-CN-YunxiNeural", "enabled": true },
-      { "label": "成熟男声", "key": "male_mature", "provider_voice": "zh-CN-YunjianNeural", "enabled": true },
-      { "label": "童声", "key": "child_cute", "provider_voice": "zh-CN-XiaoyiNeural", "enabled": true }
+      {
+        "label": "温柔女声",
+        "key": "female_standard",
+        "provider_voice": "zh-CN-XiaoxiaoNeural",
+        "enabled": true
+      },
+      {
+        "label": "活力男声",
+        "key": "male_dynamic",
+        "provider_voice": "zh-CN-YunxiNeural",
+        "enabled": true
+      },
+      {
+        "label": "成熟男声",
+        "key": "male_mature",
+        "provider_voice": "zh-CN-YunjianNeural",
+        "enabled": true
+      },
+      {
+        "label": "童声",
+        "key": "child_cute",
+        "provider_voice": "zh-CN-XiaoyiNeural",
+        "enabled": true
+      }
     ]
   },
   "subtitle": {
     "font_size": 11,
     "min_chars": 8,
     "max_chars": 14
+  },
+  "draft": {
+    "audio_lead_in_seconds": 0.1,
+    "audio_buffer_start": 0.1,
+    "audio_buffer_end": 0.1
   }
 }

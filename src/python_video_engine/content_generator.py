@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
-from dotenv import load_dotenv
 from mutagen.mp3 import MP3
 from moviepy.editor import AudioFileClip, concatenate_audioclips
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
@@ -28,8 +27,8 @@ logger = logging.getLogger("python_video_engine.content_generator")
 
 DEFAULT_PROVIDER_VOICE = "zh-CN-XiaoxiaoNeural"
 DEFAULT_VOICE_KEY = "female_standard"
-DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DASHSCOPE_CHAT_COMPLETIONS_URL = f"{DASHSCOPE_BASE_URL}/chat/completions"
+VERCEL_LLM_PROXY_URL = "https://python-video-engine-57pd.vercel.app/api/chat"
+VERCEL_LLM_PROXY_HOST = "python-video-engine-57pd.vercel.app"
 DASHSCOPE_HOST = "dashscope.aliyuncs.com"
 
 SCRIPT_LANGUAGE_ZH = "zh"
@@ -49,6 +48,16 @@ VOICE_LIBRARY = {
     "en-GB-SoniaNeural": "en-GB-SoniaNeural",
     "en-US-AndrewNeural": "en-US-AndrewNeural",
 }
+
+DEFAULT_STYLE_PROMPTS: dict[str, str] = {
+    "实力品控": "围绕企业在质量管理、过程检验、来料与出货标准上的实力展开，突出可量化、可验证的品控能力。",
+    "核心产品": "聚焦企业最核心产品，强调产品特性、应用场景、适配行业与解决问题的价值。",
+    "诚邀合作": "以合作邀约为主线，传达合作方式、服务态度、响应速度与长期合作价值。",
+    "定制研发": "突出定制开发与研发协同能力，体现从需求沟通、打样到量产落地的完整能力。",
+    "高效交付": "围绕交付效率、产能组织、排产能力与交期稳定性，体现供应链协同与履约能力。",
+}
+COMPANY_PROFILE_CANDIDATES = ["公司简介.txt", "公司介绍.txt", "企业简介.txt", "company_profile.txt"]
+COMPANY_PROFILE_MAX_CHARS = 4000
 
 
 @dataclass(slots=True)
@@ -73,7 +82,7 @@ class ContentGenerator:
     def __init__(self, voice_key: str = DEFAULT_VOICE_KEY, target_language: str = SCRIPT_LANGUAGE_ZH, target_duration: str = '30-60', random_seed: int | None = None) -> None:
         if not logging.getLogger().handlers:
             logging.basicConfig(level=logging.INFO, format="%(message)s")
-        self._load_runtime_env()
+        self.style_prompts = self._load_style_prompts()
 
         self.runtime_config = get_runtime_config()
         self.voice_library = {item["key"]: item["provider_voice"] for item in get_enabled_voices()}
@@ -93,13 +102,12 @@ class ContentGenerator:
         self.temp_assets_dir = self._project_root() / "temp_assets"
         self.temp_assets_dir.mkdir(parents=True, exist_ok=True)
 
-        self.llm_api_url = (os.getenv("LLM_API_URL", "").strip() or DASHSCOPE_BASE_URL)
-        self.llm_model = os.getenv("LLM_MODEL", str(get_config_value("llm", "model", default="qwen-plus"))).strip()
-        self.llm_timeout = int(os.getenv("API_TIMEOUT", str(get_config_value("llm", "timeout_seconds", default=120) or 120)).strip() or 120)
-        self.llm_api_key_env = str(get_config_value("llm", "api_key_env", default="SILICONFLOW_API_KEY")).strip() or "SILICONFLOW_API_KEY"
-        self.llm_requires_api_key = bool(get_config_value("llm", "requires_api_key", default=True))
+        self.llm_api_url = VERCEL_LLM_PROXY_URL
+        self.llm_model = str(get_config_value("llm", "model", default="qwen-plus")).strip()
+        self.llm_timeout = 120
+        self.llm_requires_api_key = False
         self.llm_system_prompt = str(get_config_value("llm", "system_prompt", default="你擅长撰写中文外贸工厂短视频口播文案。")).strip()
-        self.llm_api_key = self._resolve_llm_api_key()
+        self.llm_api_key = ""
         self.translation_enabled = bool(get_config_value("llm", "translation_enabled", default=False))
 
         self.proxy_settings = ProxySettings.from_env()
@@ -117,16 +125,13 @@ class ContentGenerator:
         self._dedupe_state_path = self._project_root() / ".python_video_engine_generation_state.json"
         self._generation_state = self._load_generation_state()
 
-    def generate(self, base_path: str | Path, client_name: str, keywords: list[str]) -> ContentGenerationResult:
+    def generate(self, base_path: str | Path, client_name: str, keywords: list[str], style_label: str | None = None) -> ContentGenerationResult:
         resolved_base_path = Path(base_path).expanduser().resolve(strict=False)
-        logger.info("[ContentGenerator] 开始生成文案与配音: client=%s voice=%s lang=%s", client_name, self.voice, self.target_language)
+        logger.info("[ContentGenerator] 开始生成文案与配音: client=%s voice=%s lang=%s style=%s", client_name, self.voice, self.target_language, style_label or "")
 
-        latest_keywords = self._load_latest_keywords(resolved_base_path)
-        effective_keywords = latest_keywords if latest_keywords else keywords
-        if latest_keywords:
-            logger.info("[ContentGenerator] 使用 keywords.txt 最新内容: count=%s", len(latest_keywords))
-
-        script_structure = self._generate_script(client_name=client_name, keywords=effective_keywords)
+        company_profile_text = self._load_company_profile_text(resolved_base_path)
+        effective_keywords: list[str] = []
+        script_structure = self._generate_script(client_name=client_name, keywords=effective_keywords, style_label=style_label, company_profile_text=company_profile_text)
         script_text = script_structure["script_for_tts"]
         self._remember_opening(script_text, self.target_language)
         script_hash = self._script_hash(script_text)
@@ -370,42 +375,56 @@ class ContentGenerator:
             + "\n\n建议：1）确认代理软件对本程序生效；2）若公司网络拦截 workers.dev，请换网络或让网管放行；3）尝试更换代理节点（日本/新加坡常见更稳）。"
         )
 
-    def _generate_script(self, client_name: str, keywords: list[str]) -> dict[str, str]:
+    def _generate_script(self, client_name: str, keywords: list[str], style_label: str | None = None, company_profile_text: str = "") -> dict[str, str]:
         if self.target_language == SCRIPT_LANGUAGE_EN:
-            script_en = self._generate_llm_script_en(client_name=client_name, keywords=keywords)
+            script_en = self._generate_llm_script_en(client_name=client_name, keywords=keywords, style_label=style_label, company_profile_text=company_profile_text)
             return {"script_zh": "", "script_en": script_en, "script_translated": "", "script_for_tts": script_en}
-        script_zh = self._generate_llm_script_zh(client_name=client_name, keywords=keywords)
+        script_zh = self._generate_llm_script_zh(client_name=client_name, keywords=keywords, style_label=style_label, company_profile_text=company_profile_text)
         return {"script_zh": script_zh, "script_en": "", "script_translated": "", "script_for_tts": script_zh}
 
-    def _generate_llm_script_zh(self, client_name: str, keywords: list[str]) -> str:
+    def _generate_llm_script_zh(self, client_name: str, keywords: list[str], style_label: str | None = None, company_profile_text: str = "") -> str:
         keyword_text = self._keywords_to_prompt_text(keywords)
         min_len, max_len = self._random_length_range(script_language=SCRIPT_LANGUAGE_ZH)
         style = self._next_narrative_style(script_language=SCRIPT_LANGUAGE_ZH)
         opening_guard = self._next_opening_guard(script_language=SCRIPT_LANGUAGE_ZH)
         target_time = '25~45秒' if self.target_duration == '15-30' else '50~90秒'
+        style_prompt = self._resolve_style_prompt(style_label)
+        company_fact_block = company_profile_text.strip() or "未提供公司简介，请仅基于客户名称与文风要求生成，不要编造具体资质数据。"
+        keyword_clause = f"补充关键词（可参考）：{keyword_text}。" if keyword_text.strip() else ""
         prompt = (
-            f"请根据 keywords.txt 的业务关键词，为客户“{client_name}”创作一段中文工厂宣传口播稿。"
-            f"关键词全文（请完整吸收，不要只挑少量词）：{keyword_text}。"
+            f"请根据公司简介，为客户“{client_name}”创作一段中文工厂宣传口播稿。"
+            f"当前文风标签：{style_label or '未指定'}。"
+            f"该文风写作要求：{style_prompt}。"
+            f"公司简介原文（优先参考，严禁虚构）：{company_fact_block}。"
+            f"{keyword_clause}"
             f"要求：1. 字数 {min_len}~{max_len} 字；2. 叙述角度必须使用“{style}”；"
             f"3. 预计口播时长控制在 {target_time}；"
             "4. 口语化但不空泛，避免口水话和万能套话；"
             "5. 必须体现具体业务信息：至少包含产品/工艺、品质控制、交付/服务中的两项；"
-            f"6. 开头第一句话严禁使用这些开头：{opening_guard}；"
-            "7. 不要标题、不要分点、不要引号，只输出文案正文。"
+            "6. 内容仅能基于公司简介（以及可选补充关键词），不确定信息用稳妥表述；"
+            f"7. 开头第一句话严禁使用这些开头：{opening_guard}；"
+            "8. 不要标题、不要分点、不要引号，只输出文案正文。"
         )
         return self._request_llm(system_prompt=self.llm_system_prompt, user_prompt=prompt)
 
-    def _generate_llm_script_en(self, client_name: str, keywords: list[str]) -> str:
+    def _generate_llm_script_en(self, client_name: str, keywords: list[str], style_label: str | None = None, company_profile_text: str = "") -> str:
         keyword_text = self._keywords_to_prompt_text(keywords)
         min_len, max_len = self._random_length_range(script_language=SCRIPT_LANGUAGE_EN)
         style = self._next_narrative_style(script_language=SCRIPT_LANGUAGE_EN)
         opening_guard = self._next_opening_guard(script_language=SCRIPT_LANGUAGE_EN)
         target_time = '25-45 seconds' if self.target_duration == '15-30' else '50-90 seconds'
+        style_prompt = self._resolve_style_prompt(style_label)
+        company_fact_block = company_profile_text.strip() or "No company profile provided. Base script on style requirement and client name only, and avoid fabricating certifications or figures."
+        keyword_clause = f"Supplemental keywords (optional): {keyword_text}. " if keyword_text.strip() else ""
         prompt = (
-            f"Based on the full business keywords from keywords.txt for client '{client_name}', write an English factory promo voiceover script. "
-            f"Keywords (use comprehensively): {keyword_text}. "
+            f"Based on company profile for client '{client_name}', write an English factory promo voiceover script. "
+            f"Current style tag: {style_label or 'not specified'}. "
+            f"Style requirement: {style_prompt}. "
+            f"Company profile (primary facts, do not fabricate): {company_fact_block}. "
+            f"{keyword_clause}"
             f"Requirements: {min_len}-{max_len} words, estimated speaking length {target_time}, perspective must be '{style}', no Chinese characters, no bullet points, no title, no quotation marks, "
-            "avoid filler language, include concrete details about product/process, quality control, and delivery/service. "
+            "avoid filler language, include concrete details about product/process, quality control, and delivery/service, "
+            "only state facts supported by company profile (and optional supplemental keywords). "
             f"The opening sentence must not reuse these openings: {opening_guard}. "
             "Use clearly different tone and first sentence from previous generation."
         )
@@ -418,11 +437,7 @@ class ContentGenerator:
 
     def _request_llm(self, system_prompt: str, user_prompt: str) -> str:
         api_url = self._resolve_llm_api_url()
-        if self.llm_requires_api_key and not self.llm_api_key:
-            raise RuntimeError("未检测到大模型接口密钥。\n请在项目根目录 .env 中配置 SILICONFLOW_API_KEY（百炼 API Key）后重试。")
         headers = {"Content-Type": "application/json"}
-        if self.llm_api_key:
-            headers["Authorization"] = f"Bearer {self.llm_api_key}"
         payload = {
             "model": self.llm_model,
             "temperature": 0.8,
@@ -436,19 +451,19 @@ class ContentGenerator:
             status = exc.response.status_code if exc.response is not None else "unknown"
             detail = exc.response.text if exc.response is not None else str(exc)
             if status == 401:
-                raise RuntimeError("百炼鉴权失败（HTTP 401）。请检查 SILICONFLOW_API_KEY 是否正确。\n接口：" + api_url + "\n返回：" + detail) from exc
+                raise RuntimeError("云端中转接口鉴权失败（HTTP 401）。请检查 Vercel 环境变量中的 SILICONFLOW_API_KEY 是否正确。\n接口：" + api_url + "\n返回：" + detail) from exc
             if status == 429:
-                raise RuntimeError("百炼触发频率限制（HTTP 429）。已自动重试仍未成功，请稍后再试。\n接口：" + api_url + "\n返回：" + detail) from exc
-            raise RuntimeError("大模型文案生成失败，请检查 API Key、网络或接口配置。\n接口：" + api_url + "\nHTTP 状态：" + str(status) + "\n详情：" + detail) from exc
+                raise RuntimeError("云端中转接口触发频率限制（HTTP 429）。已自动重试仍未成功，请稍后再试。\n接口：" + api_url + "\n返回：" + detail) from exc
+            raise RuntimeError("大模型文案生成失败，请检查云端中转接口、网络或 Vercel 配置。\n接口：" + api_url + "\nHTTP 状态：" + str(status) + "\n详情：" + detail) from exc
         except Exception as exc:
-            raise RuntimeError("大模型文案生成失败，请检查 API Key、网络或接口配置。\n接口：" + api_url + "\n详情：" + str(exc)) from exc
+            raise RuntimeError("大模型文案生成失败，请检查云端中转接口、网络或 Vercel 配置。\n接口：" + api_url + "\n详情：" + str(exc)) from exc
         if not content:
             raise RuntimeError("大模型返回内容为空，无法继续生成文案。" f"\n接口：{api_url}")
         return content.replace("\n", " ").strip()
 
     def _llm_post(self, url: str, headers: dict[str, str], payload: dict) -> httpx.Response:
         if not self._ai_server_checked:
-            ok, detail = check_tcp_connectivity(DASHSCOPE_HOST, 443, timeout_seconds=3.0)
+            ok, detail = check_tcp_connectivity(VERCEL_LLM_PROXY_HOST, 443, timeout_seconds=3.0)
             self._ai_server_checked = True
             if not ok:
                 logger.warning("[ContentGenerator] 百炼连通性预检查失败，继续尝试请求: %s", detail)
@@ -461,16 +476,8 @@ class ContentGenerator:
             before_sleep=lambda _: logger.warning("网络拥堵或触发频率限制，正在尝试重新连接..."),
         )
         def _do() -> httpx.Response:
-            if "aliyuncs.com" in url:
-                try:
-                    with httpx.Client(timeout=httpx.Timeout(float(self.llm_timeout)), trust_env=True, follow_redirects=True, proxy=None) as client:
-                        response = client.post(url, json=payload, headers=headers)
-                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError):
-                    with httpx.Client(timeout=httpx.Timeout(float(self.llm_timeout)), trust_env=True, follow_redirects=True) as client:
-                        response = client.post(url, json=payload, headers=headers)
-            else:
-                with build_httpx_client(timeout_seconds=float(self.llm_timeout), proxy_settings=self.proxy_settings) as client:
-                    response = client.post(url, json=payload, headers=headers)
+            with build_httpx_client(timeout_seconds=float(self.llm_timeout), proxy_settings=self.proxy_settings) as client:
+                response = client.post(url, json=payload, headers=headers)
             if response.status_code == 429:
                 raise httpx.HTTPStatusError("Rate limited", request=response.request, response=response)
             return response
@@ -487,6 +494,65 @@ class ContentGenerator:
     def _keywords_to_prompt_text(self, keywords: list[str]) -> str:
         selected = [item.strip() for item in keywords if item.strip()][:50]
         return "、".join(selected) if selected else "factory capability, quality control, stable delivery, export service"
+
+    def _resolve_style_prompt(self, style_label: str | None) -> str:
+        key = (style_label or "").strip()
+        if key and key in self.style_prompts:
+            return self.style_prompts[key].strip()
+        if key and key in DEFAULT_STYLE_PROMPTS:
+            return DEFAULT_STYLE_PROMPTS[key].strip()
+        return "围绕工厂实力、产品价值与合作信任进行自然表达，避免空泛措辞。"
+
+    def _style_prompt_config_path(self) -> Path:
+        return self._project_root() / "config" / "style_prompts.json"
+
+    def _load_style_prompts(self) -> dict[str, str]:
+        path = self._style_prompt_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            payload = {
+                "version": "1.0",
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "style_prompts": DEFAULT_STYLE_PROMPTS,
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            return dict(DEFAULT_STYLE_PROMPTS)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            prompts = payload.get("style_prompts", {}) if isinstance(payload, dict) else {}
+            if not isinstance(prompts, dict):
+                return dict(DEFAULT_STYLE_PROMPTS)
+            merged = dict(DEFAULT_STYLE_PROMPTS)
+            for k, v in prompts.items():
+                if k in merged and str(v).strip():
+                    merged[k] = str(v).strip()
+            return merged
+        except Exception as exc:
+            logger.warning("[ContentGenerator] 读取文风提示词配置失败，已回退默认: %s", exc)
+            return dict(DEFAULT_STYLE_PROMPTS)
+
+    def _read_text_with_fallback_encodings(self, path: Path) -> str:
+        for encoding in ("utf-8", "utf-8-sig", "gbk"):
+            try:
+                return path.read_text(encoding=encoding)
+            except Exception:
+                continue
+        return ""
+
+    def _load_company_profile_text(self, base_path: Path) -> str:
+        for file_name in COMPANY_PROFILE_CANDIDATES:
+            candidate = base_path / file_name
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            content = self._read_text_with_fallback_encodings(candidate).strip()
+            if not content:
+                continue
+            if len(content) > COMPANY_PROFILE_MAX_CHARS:
+                content = content[:COMPANY_PROFILE_MAX_CHARS]
+            logger.info("[ContentGenerator] 已加载公司简介: %s", candidate.name)
+            return content
+        logger.info("[ContentGenerator] 未检测到公司简介文件，按关键词模式生成")
+        return ""
 
     def _load_latest_keywords(self, base_path: Path) -> list[str]:
         for file_name in ["keywords.txt", "keywords"]:
@@ -521,20 +587,8 @@ class ContentGenerator:
             return True
         return False
 
-    def _resolve_llm_api_key(self) -> str:
-        for value in [os.getenv("SILICONFLOW_API_KEY", "").strip(), os.getenv(self.llm_api_key_env, "").strip(), os.getenv("LLM_API_KEY", "").strip()]:
-            if value:
-                return value
-        return ""
-
     def _resolve_llm_api_url(self) -> str:
-        configured = self.llm_api_url.strip().rstrip("/")
-        base = DASHSCOPE_BASE_URL.rstrip("/")
-        if not configured or configured == base:
-            return DASHSCOPE_CHAT_COMPLETIONS_URL
-        if configured.startswith(base):
-            return configured
-        raise RuntimeError("大模型接口地址配置错误。\n" f"当前配置：{configured}\n" f"请使用阿里云百炼 OpenAI 兼容地址：{DASHSCOPE_BASE_URL}")
+        return VERCEL_LLM_PROXY_URL
 
     def _ensure_valid_audio_file(self, audio_path: Path) -> None:
         if not audio_path.exists() or audio_path.stat().st_size <= 0:
@@ -650,5 +704,11 @@ class ContentGenerator:
 
     def _project_root(self) -> Path:
         if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent
+            configured = os.getenv("JAE_RUNTIME_DIR", "").strip()
+            if configured:
+                p = Path(configured).expanduser().resolve(strict=False)
+            else:
+                p = (Path.home() / ".jianying_auto_editor").resolve(strict=False)
+            p.mkdir(parents=True, exist_ok=True)
+            return p
         return Path(__file__).resolve().parents[2]
