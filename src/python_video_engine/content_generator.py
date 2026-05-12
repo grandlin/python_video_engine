@@ -103,7 +103,7 @@ class ContentGenerator:
         self.temp_assets_dir.mkdir(parents=True, exist_ok=True)
 
         self.llm_api_url = LLM_RELAY_URL
-        self.llm_model = os.getenv("LLM_MODEL", str(get_config_value("llm", "model", default="qwen-plus"))).strip()
+        self.llm_model = "qwen-plus"
         self.llm_timeout = 120
         self.llm_system_prompt = str(get_config_value("llm", "system_prompt", default="你擅长撰写中文外贸工厂短视频口播文案。")).strip()
         self.translation_enabled = bool(get_config_value("llm", "translation_enabled", default=False))
