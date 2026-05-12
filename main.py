@@ -364,7 +364,10 @@ def run_pipeline(base_path, client_name, voice_key=None, draft_box=None, progres
     min_ready_materials=max(1,int(get_config_value('scan','min_ready_materials',default=30) or 30))
     generator=ContentGenerator(voice_key=voice_key,target_language=target_language,target_duration=target_duration,random_seed=0)
     fetcher=MaterialFetcher(progress_callback=_build_scan_progress_adapter(progress, 0, 1))
-    fetch=fetcher.fetch_ready_then_background(base_path=base_path,client_name=client_name,min_ready_materials=min_ready_materials)
+    if hasattr(fetcher, 'fetch_ready_then_background'):
+        fetch=fetcher.fetch_ready_then_background(base_path=base_path,client_name=client_name,min_ready_materials=min_ready_materials)
+    else:
+        fetch=fetcher.fetch(base_path=base_path,client_name=client_name)
     if len(fetch.materials) < min_ready_materials:
         raise RuntimeError(f'可用素材不足，当前仅 {len(fetch.materials)} 条，未达到最小可开工阈值 {min_ready_materials}。')
     if progress:
