@@ -26,8 +26,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "api_url": "https://python-video-engine-57pd.vercel.app/api/chat",
         "model": "qwen-plus",
         "timeout_seconds": 120,
-        "api_key_env": "",
-        "requires_api_key": False,
         "system_prompt": "你擅长撰写中文外贸工厂短视频口播文案。",
         "script_language": "zh-CN",
         "translation_enabled": False,
@@ -92,6 +90,19 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def _load_local_env_overrides() -> dict[str, Any]:
+    llm_api_url = str(os.getenv("LLM_API_URL", "") or "").strip()
+    llm_model = str(os.getenv("LLM_MODEL", "") or "").strip()
+
+    llm_patch: dict[str, Any] = {}
+    if llm_api_url:
+        llm_patch["api_url"] = llm_api_url
+    if llm_model:
+        llm_patch["model"] = llm_model
+
+    return {"llm": llm_patch} if llm_patch else {}
+
+
 def _load_user_settings_patch() -> dict[str, Any]:
     payload = _read_json_file(USER_SETTINGS_PATH)
     if not payload:
@@ -119,7 +130,6 @@ def get_remote_config() -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("remote config must be a JSON object")
 
-    dashscope_key = str(payload.get("dashscope_key", "") or "").strip()
     llm_api_url = str(payload.get("llm_api_url", "") or "").strip()
     llm_model = str(payload.get("llm_model", "") or "").strip()
 
@@ -128,8 +138,6 @@ def get_remote_config() -> dict[str, Any]:
         llm_patch["api_url"] = llm_api_url
     if llm_model:
         llm_patch["model"] = llm_model
-    if dashscope_key:
-        llm_patch["api_key"] = dashscope_key
 
     return {"llm": llm_patch} if llm_patch else {}
 
@@ -143,7 +151,11 @@ def get_runtime_config() -> dict[str, Any]:
         config = _deep_merge(config, remote_patch)
         logger.info("[RuntimeConfig] 已加载远程配置: %s", REMOTE_CONFIG_URL)
     except Exception as exc:
-        logger.warning("[RuntimeConfig] 远程配置加载失败，继续使用本地内置配置: %s", exc)
+        logger.warning("[RuntimeConfig] 远程配置加载失败，回退环境变量: %s", exc)
+        env_patch = _load_local_env_overrides()
+        if env_patch:
+            config = _deep_merge(config, env_patch)
+            logger.info("[RuntimeConfig] 已加载本地环境变量回退配置")
 
     user_settings_patch = _load_user_settings_patch()
     if user_settings_patch:

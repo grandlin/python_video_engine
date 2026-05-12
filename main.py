@@ -91,6 +91,10 @@ def _build_precheck_progress_adapter(progress, video_idx: int, video_count: int)
     return _cb
 
 
+def _load_env_for_runtime() -> None:
+    return
+
+
 def _auto_configure_proxy_from_common_ports() -> None:
     if any(str(os.getenv(k, "")).strip() for k in ("CUSTOM_PROXY_URL", "HTTPS_PROXY", "HTTP_PROXY")):
         return
@@ -107,6 +111,7 @@ def _auto_configure_proxy_from_common_ports() -> None:
         except Exception:
             continue
 
+_load_env_for_runtime()
 cleanup_legacy_secret_cache()
 _auto_configure_proxy_from_common_ports()
 
@@ -364,10 +369,7 @@ def run_pipeline(base_path, client_name, voice_key=None, draft_box=None, progres
     min_ready_materials=max(1,int(get_config_value('scan','min_ready_materials',default=30) or 30))
     generator=ContentGenerator(voice_key=voice_key,target_language=target_language,target_duration=target_duration,random_seed=0)
     fetcher=MaterialFetcher(progress_callback=_build_scan_progress_adapter(progress, 0, 1))
-    if hasattr(fetcher, 'fetch_ready_then_background'):
-        fetch=fetcher.fetch_ready_then_background(base_path=base_path,client_name=client_name,min_ready_materials=min_ready_materials)
-    else:
-        fetch=fetcher.fetch(base_path=base_path,client_name=client_name)
+    fetch=fetcher.fetch_ready_then_background(base_path=base_path,client_name=client_name,min_ready_materials=min_ready_materials)
     if len(fetch.materials) < min_ready_materials:
         raise RuntimeError(f'可用素材不足，当前仅 {len(fetch.materials)} 条，未达到最小可开工阈值 {min_ready_materials}。')
     if progress:

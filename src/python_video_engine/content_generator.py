@@ -27,8 +27,7 @@ logger = logging.getLogger("python_video_engine.content_generator")
 
 DEFAULT_PROVIDER_VOICE = "zh-CN-XiaoxiaoNeural"
 DEFAULT_VOICE_KEY = "female_standard"
-VERCEL_LLM_PROXY_URL = "https://python-video-engine-57pd.vercel.app/api/chat"
-VERCEL_LLM_PROXY_HOST = "python-video-engine-57pd.vercel.app"
+LLM_RELAY_URL = "https://python-video-engine-57pd.vercel.app/api/chat"
 DASHSCOPE_HOST = "dashscope.aliyuncs.com"
 
 SCRIPT_LANGUAGE_ZH = "zh"
@@ -82,6 +81,7 @@ class ContentGenerator:
     def __init__(self, voice_key: str = DEFAULT_VOICE_KEY, target_language: str = SCRIPT_LANGUAGE_ZH, target_duration: str = '30-60', random_seed: int | None = None) -> None:
         if not logging.getLogger().handlers:
             logging.basicConfig(level=logging.INFO, format="%(message)s")
+        self._load_runtime_env()
         self.style_prompts = self._load_style_prompts()
 
         self.runtime_config = get_runtime_config()
@@ -102,12 +102,10 @@ class ContentGenerator:
         self.temp_assets_dir = self._project_root() / "temp_assets"
         self.temp_assets_dir.mkdir(parents=True, exist_ok=True)
 
-        self.llm_api_url = VERCEL_LLM_PROXY_URL
-        self.llm_model = str(get_config_value("llm", "model", default="qwen-plus")).strip()
+        self.llm_api_url = LLM_RELAY_URL
+        self.llm_model = os.getenv("LLM_MODEL", str(get_config_value("llm", "model", default="qwen-plus"))).strip()
         self.llm_timeout = 120
-        self.llm_requires_api_key = False
         self.llm_system_prompt = str(get_config_value("llm", "system_prompt", default="你擅长撰写中文外贸工厂短视频口播文案。")).strip()
-        self.llm_api_key = ""
         self.translation_enabled = bool(get_config_value("llm", "translation_enabled", default=False))
 
         self.proxy_settings = ProxySettings.from_env()
@@ -450,20 +448,28 @@ class ContentGenerator:
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             detail = exc.response.text if exc.response is not None else str(exc)
-            if status == 401:
-                raise RuntimeError("云端中转接口鉴权失败（HTTP 401）。请检查 Vercel 环境变量中的 SILICONFLOW_API_KEY 是否正确。\n接口：" + api_url + "\n返回：" + detail) from exc
+            if status in (401, 403, 500):
+                raise RuntimeError(
+                    "云端中转请求失败，请检查 Vercel 中转服务或其环境变量配置。"
+                    + "\n接口："
+                    + api_url
+                    + "\nHTTP 状态："
+                    + str(status)
+                    + "\n返回："
+                    + detail
+                ) from exc
             if status == 429:
-                raise RuntimeError("云端中转接口触发频率限制（HTTP 429）。已自动重试仍未成功，请稍后再试。\n接口：" + api_url + "\n返回：" + detail) from exc
-            raise RuntimeError("大模型文案生成失败，请检查云端中转接口、网络或 Vercel 配置。\n接口：" + api_url + "\nHTTP 状态：" + str(status) + "\n详情：" + detail) from exc
+                raise RuntimeError("云端中转触发频率限制（HTTP 429）。已自动重试仍未成功，请稍后再试。\n接口：" + api_url + "\n返回：" + detail) from exc
+            raise RuntimeError("大模型文案生成失败，请检查网络或云端中转接口配置。\n接口：" + api_url + "\nHTTP 状态：" + str(status) + "\n详情：" + detail) from exc
         except Exception as exc:
-            raise RuntimeError("大模型文案生成失败，请检查云端中转接口、网络或 Vercel 配置。\n接口：" + api_url + "\n详情：" + str(exc)) from exc
+            raise RuntimeError("大模型文案生成失败，请检查网络或云端中转接口配置。\n接口：" + api_url + "\n详情：" + str(exc)) from exc
         if not content:
             raise RuntimeError("大模型返回内容为空，无法继续生成文案。" f"\n接口：{api_url}")
         return content.replace("\n", " ").strip()
 
     def _llm_post(self, url: str, headers: dict[str, str], payload: dict) -> httpx.Response:
         if not self._ai_server_checked:
-            ok, detail = check_tcp_connectivity(VERCEL_LLM_PROXY_HOST, 443, timeout_seconds=3.0)
+            ok, detail = check_tcp_connectivity(DASHSCOPE_HOST, 443, timeout_seconds=3.0)
             self._ai_server_checked = True
             if not ok:
                 logger.warning("[ContentGenerator] 百炼连通性预检查失败，继续尝试请求: %s", detail)
@@ -476,8 +482,16 @@ class ContentGenerator:
             before_sleep=lambda _: logger.warning("网络拥堵或触发频率限制，正在尝试重新连接..."),
         )
         def _do() -> httpx.Response:
-            with build_httpx_client(timeout_seconds=float(self.llm_timeout), proxy_settings=self.proxy_settings) as client:
-                response = client.post(url, json=payload, headers=headers)
+            if "aliyuncs.com" in url:
+                try:
+                    with httpx.Client(timeout=httpx.Timeout(float(self.llm_timeout)), trust_env=True, follow_redirects=True, proxy=None) as client:
+                        response = client.post(url, json=payload, headers=headers)
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError):
+                    with httpx.Client(timeout=httpx.Timeout(float(self.llm_timeout)), trust_env=True, follow_redirects=True) as client:
+                        response = client.post(url, json=payload, headers=headers)
+            else:
+                with build_httpx_client(timeout_seconds=float(self.llm_timeout), proxy_settings=self.proxy_settings) as client:
+                    response = client.post(url, json=payload, headers=headers)
             if response.status_code == 429:
                 raise httpx.HTTPStatusError("Rate limited", request=response.request, response=response)
             return response
@@ -588,7 +602,7 @@ class ContentGenerator:
         return False
 
     def _resolve_llm_api_url(self) -> str:
-        return VERCEL_LLM_PROXY_URL
+        return LLM_RELAY_URL
 
     def _ensure_valid_audio_file(self, audio_path: Path) -> None:
         if not audio_path.exists() or audio_path.stat().st_size <= 0:
@@ -693,14 +707,7 @@ class ContentGenerator:
         return rate, pitch
 
     def _load_runtime_env(self) -> None:
-        candidates: list[Path] = []
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            candidates.append(Path(meipass) / ".env")
-        candidates.append(self._project_root() / ".env")
-        candidates.append(Path.cwd() / ".env")
-        for p in candidates:
-            load_dotenv(p, override=False)
+        return
 
     def _project_root(self) -> Path:
         if getattr(sys, "frozen", False):
