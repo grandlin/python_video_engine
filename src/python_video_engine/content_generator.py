@@ -131,6 +131,8 @@ class ContentGenerator:
         effective_keywords: list[str] = []
         script_structure = self._generate_script(client_name=client_name, keywords=effective_keywords, style_label=style_label, company_profile_text=company_profile_text)
         script_text = script_structure["script_for_tts"]
+        script_text = self._ensure_tts_safe_script(script_text, self.target_language)
+        script_structure["script_for_tts"] = script_text
         self._remember_opening(script_text, self.target_language)
         script_hash = self._script_hash(script_text)
         self._generation_state["last_script_hash"] = script_hash
@@ -403,7 +405,38 @@ class ContentGenerator:
             f"7. 开头第一句话严禁使用这些开头：{opening_guard}；"
             "8. 不要标题、不要分点、不要引号，只输出文案正文。"
         )
-        return self._request_llm(system_prompt=self.llm_system_prompt, user_prompt=prompt)
+        force_15_30 = self.target_duration == '15-30'
+        force_30_60 = self.target_duration == '30-60'
+        if force_15_30:
+            prompt += " 请严格将总字数绝对不可超过85个汉字。"
+        elif force_30_60:
+            prompt += " 请严格将总字数绝对不可超过180个汉字。"
+
+        last_content = ""
+        for attempt in range(1, 4):
+            try:
+                content = self._request_llm(system_prompt=self.llm_system_prompt, user_prompt=prompt)
+                last_content = content
+                if force_15_30:
+                    if self._is_valid_zh_15_30_script(content):
+                        return content
+                    logger.warning("[ContentGenerator] 中文 15-30s 文案字数不合规，自动重试生成: attempt=%s/3", attempt)
+                    continue
+                if force_30_60:
+                    if self._is_valid_zh_30_60_script(content):
+                        return content
+                    logger.warning("[ContentGenerator] 中文 30-60s 文案字数超上限，自动重试生成: attempt=%s/3", attempt)
+                    continue
+                return content
+            except Exception as exc:
+                logger.warning("[ContentGenerator] 中文文案请求失败，自动重试: attempt=%s/3 err=%s", attempt, exc)
+
+        fallback = last_content or self._build_fallback_script(client_name=client_name, script_language=SCRIPT_LANGUAGE_ZH)
+        if force_15_30:
+            fallback = self._truncate_to_complete_sentence(fallback, script_language=SCRIPT_LANGUAGE_ZH, max_units=95)
+        elif force_30_60:
+            fallback = self._truncate_to_complete_sentence(fallback, script_language=SCRIPT_LANGUAGE_ZH, max_units=190)
+        return fallback
 
     def _generate_llm_script_en(self, client_name: str, keywords: list[str], style_label: str | None = None, company_profile_text: str = "") -> str:
         keyword_text = self._keywords_to_prompt_text(keywords)
@@ -426,12 +459,39 @@ class ContentGenerator:
             f"The opening sentence must not reuse these openings: {opening_guard}. "
             "Use clearly different tone and first sentence from previous generation."
         )
+        force_15_30 = self.target_duration == '15-30'
+        force_30_60 = self.target_duration == '30-60'
+        if force_15_30:
+            prompt += " Total length MUST NOT exceed 50 words."
+        elif force_30_60:
+            prompt += " Total length MUST NOT exceed 110 words."
+
+        last_content = ""
         for attempt in range(1, 4):
-            content = self._request_llm(system_prompt=ENGLISH_SYSTEM_PROMPT, user_prompt=prompt)
-            if not self._looks_degenerate_english_script(content):
+            try:
+                content = self._request_llm(system_prompt=ENGLISH_SYSTEM_PROMPT, user_prompt=prompt)
+                last_content = content
+                if self._looks_degenerate_english_script(content):
+                    logger.warning("[ContentGenerator] 检测到英文文案异常重复，自动重试生成: attempt=%s/3", attempt)
+                    continue
+                if force_15_30:
+                    if not self._is_valid_en_15_30_script(content):
+                        logger.warning("[ContentGenerator] 英文 15-30s 文案词数不合规，自动重试生成: attempt=%s/3", attempt)
+                        continue
+                elif force_30_60:
+                    if not self._is_valid_en_30_60_script(content):
+                        logger.warning("[ContentGenerator] 英文 30-60s 文案词数超上限，自动重试生成: attempt=%s/3", attempt)
+                        continue
                 return content
-            logger.warning("[ContentGenerator] 检测到英文文案异常重复，自动重试生成: attempt=%s/3", attempt)
-        raise RuntimeError("英文文案生成异常：检测到重复灌词（如 on on on ...），请重试。")
+            except Exception as exc:
+                logger.warning("[ContentGenerator] 英文文案请求失败，自动重试: attempt=%s/3 err=%s", attempt, exc)
+
+        fallback = last_content or self._build_fallback_script(client_name=client_name, script_language=SCRIPT_LANGUAGE_EN)
+        if force_15_30:
+            fallback = self._truncate_to_complete_sentence(fallback, script_language=SCRIPT_LANGUAGE_EN, max_units=55)
+        elif force_30_60:
+            fallback = self._truncate_to_complete_sentence(fallback, script_language=SCRIPT_LANGUAGE_EN, max_units=120)
+        return fallback
 
     def _request_llm(self, system_prompt: str, user_prompt: str) -> str:
         api_url = self._resolve_llm_api_url()
@@ -580,6 +640,106 @@ class ContentGenerator:
                 return []
             return lines
         return []
+
+    def _count_chinese_chars(self, text: str) -> int:
+        return len(re.findall(r"[\u4e00-\u9fff]", text or ""))
+
+    def _count_english_words(self, text: str) -> int:
+        return len(re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", text or ""))
+
+    def _truncate_to_complete_sentence(self, text: str, script_language: str, max_units: int) -> str:
+        normalized = " ".join((text or "").split()).strip()
+        if not normalized:
+            return self._build_fallback_script(client_name="客户", script_language=script_language)
+
+        sentence_endings = {"。", "！", "？", ".", "!", "?"}
+
+        if script_language == SCRIPT_LANGUAGE_ZH:
+            count = 0
+            last_end_idx = -1
+            for idx, ch in enumerate(normalized):
+                if re.match(r"[\u4e00-\u9fff]", ch):
+                    count += 1
+                if ch in sentence_endings and count <= max_units:
+                    last_end_idx = idx
+                if count > max_units:
+                    break
+
+            if count <= max_units:
+                if normalized[-1] in sentence_endings:
+                    return normalized
+                # 未超过上限但句末不完整，也回退到最近句末
+                if last_end_idx >= 0:
+                    return normalized[: last_end_idx + 1].strip()
+                return self._build_fallback_script(client_name="客户", script_language=script_language)
+
+            if last_end_idx >= 0:
+                return normalized[: last_end_idx + 1].strip()
+            return self._build_fallback_script(client_name="客户", script_language=script_language)
+
+        words = re.finditer(r"[A-Za-z]+(?:'[A-Za-z]+)?", normalized)
+        count = 0
+        cut_char_idx = len(normalized)
+        for m in words:
+            count += 1
+            if count > max_units:
+                cut_char_idx = m.start()
+                break
+
+        limit_text = normalized if count <= max_units else normalized[:cut_char_idx].rstrip()
+        last_end_idx = max(limit_text.rfind('.'), limit_text.rfind('!'), limit_text.rfind('?'))
+        if last_end_idx >= 0:
+            return limit_text[: last_end_idx + 1].strip()
+        return self._build_fallback_script(client_name="client", script_language=script_language)
+
+    def _ensure_tts_safe_script(self, text: str, script_language: str) -> str:
+        normalized = " ".join((text or "").split()).strip()
+        if not normalized:
+            return self._build_fallback_script(client_name="客户", script_language=script_language)
+
+        if self.target_duration == '15-30':
+            if script_language == SCRIPT_LANGUAGE_ZH:
+                if self._is_valid_zh_15_30_script(normalized):
+                    return normalized
+                return self._truncate_to_complete_sentence(normalized, script_language=SCRIPT_LANGUAGE_ZH, max_units=95)
+            if self._is_valid_en_15_30_script(normalized):
+                return normalized
+            return self._truncate_to_complete_sentence(normalized, script_language=SCRIPT_LANGUAGE_EN, max_units=55)
+
+        if self.target_duration == '30-60':
+            if script_language == SCRIPT_LANGUAGE_ZH:
+                if self._is_valid_zh_30_60_script(normalized):
+                    return normalized
+                return self._truncate_to_complete_sentence(normalized, script_language=SCRIPT_LANGUAGE_ZH, max_units=190)
+            if self._is_valid_en_30_60_script(normalized):
+                return normalized
+            return self._truncate_to_complete_sentence(normalized, script_language=SCRIPT_LANGUAGE_EN, max_units=120)
+
+        return normalized
+
+    def _build_fallback_script(self, client_name: str, script_language: str) -> str:
+        if script_language == SCRIPT_LANGUAGE_EN:
+            return (
+                f"{client_name} focuses on reliable manufacturing and stable quality. "
+                "We support customized production, strict process control, and on-time delivery."
+            )
+        return f"{client_name}专注稳定制造与品质管控，支持定制生产、严格工序把控和准时交付。"
+
+    def _is_valid_zh_15_30_script(self, text: str) -> bool:
+        cnt = self._count_chinese_chars(text)
+        return cnt <= 95
+
+    def _is_valid_en_15_30_script(self, text: str) -> bool:
+        cnt = self._count_english_words(text)
+        return cnt <= 55
+
+    def _is_valid_zh_30_60_script(self, text: str) -> bool:
+        cnt = self._count_chinese_chars(text)
+        return cnt <= 190
+
+    def _is_valid_en_30_60_script(self, text: str) -> bool:
+        cnt = self._count_english_words(text)
+        return cnt <= 120
 
     def _looks_degenerate_english_script(self, text: str) -> bool:
         words = re.findall(r"[A-Za-z]+", text.lower())

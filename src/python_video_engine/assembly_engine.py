@@ -39,6 +39,7 @@ class AssemblyPlan:
     client_name: str
     base_path: str
     total_audio_duration_seconds: float
+    max_duration_seconds: float | None
     target_seconds_by_category: dict[str, float]
     fulfilled_seconds_by_category: dict[str, float]
     borrowed_seconds_by_category: dict[str, float]
@@ -58,11 +59,19 @@ class AssemblyEngine:
         self._video_unique_paths: set[str] = set()
         self._video_overlap_paths: set[str] = set()
 
-    def assemble(self, base_path: str | Path, client_name: str, audio_duration_seconds: float, materials: list[MaterialFileMeta]) -> AssemblyPlan:
+    def assemble(self, base_path: str | Path, client_name: str, audio_duration_seconds: float, materials: list[MaterialFileMeta], max_duration_seconds: float | None = None) -> AssemblyPlan:
         resolved_base_path = Path(base_path).expanduser().resolve(strict=False)
         self._load_usage_state(self._usage_state_path(resolved_base_path))
         total_audio_duration_seconds = round(max(audio_duration_seconds, 0.0), 3)
-        logger.info("[Assembly] 开始组装片段: client=%s audio_duration=%.3fs", client_name, total_audio_duration_seconds)
+        max_cap = None
+        if max_duration_seconds is not None:
+            try:
+                max_cap = round(max(float(max_duration_seconds), 0.0), 3)
+            except Exception:
+                max_cap = None
+        if max_cap is not None and max_cap > 0:
+            total_audio_duration_seconds = min(total_audio_duration_seconds, max_cap)
+        logger.info("[Assembly] 开始组装片段: client=%s audio_duration=%.3fs max_cap=%s", client_name, total_audio_duration_seconds, max_cap)
 
         materials_by_category = self._group_materials_by_category(materials)
         self._remaining_by_source = {k: [] for k in CATEGORY_TARGET_RATIOS}
@@ -94,7 +103,7 @@ class AssemblyEngine:
         if actual_total < required_video_total:
             gap = round(required_video_total - actual_total, 3)
             logger.info("[Assembly] 总时长仍有缺口，向 02 借用并末尾补齐: gap=%.3fs", gap)
-            extra_clips, extra_seconds, remaining = self._allocate_from_pool(
+            extra_clips, extra_seconds, _ = self._allocate_from_pool(
                 source_category=FALLBACK_CATEGORY,
                 requested_category=FALLBACK_CATEGORY,
                 target_seconds=gap,
@@ -103,9 +112,8 @@ class AssemblyEngine:
             )
             clips.extend(extra_clips)
             fulfilled_seconds_by_category[FALLBACK_CATEGORY] = round(fulfilled_seconds_by_category[FALLBACK_CATEGORY] + extra_seconds, 3)
-            if remaining > 0 and clips:
-                logger.info("[Assembly] 素材不足，使用最后片段循环填充: remaining=%.3fs", remaining)
-                clips = self._pad_with_last_clip(clips, remaining)
+            if gap > extra_seconds:
+                logger.info("[Assembly] 素材不足，已停止补片段并保持到音频结束，不再循环最后片段: remaining=%.3fs", round(gap - extra_seconds, 3))
 
         actual_total = round(sum(x.clip_duration_seconds for x in clips), 3)
         if actual_total < required_video_total:
@@ -120,6 +128,7 @@ class AssemblyEngine:
             client_name=client_name,
             base_path=str(resolved_base_path),
             total_audio_duration_seconds=total_audio_duration_seconds,
+            max_duration_seconds=max_cap,
             target_seconds_by_category=target_seconds_by_category,
             fulfilled_seconds_by_category=fulfilled_seconds_by_category,
             borrowed_seconds_by_category=borrowed_seconds_by_category,

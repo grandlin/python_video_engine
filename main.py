@@ -390,11 +390,14 @@ def run_pipeline(base_path, client_name, voice_key=None, draft_box=None, progres
                 progress(25+video_idx*55//total_count,error_msg)
             raise RuntimeError(error_msg)
 
+        duration_key=str(target_duration).strip()
+        max_duration_seconds = 30 if duration_key == '15-30' else (60 if duration_key == '30-60' else None)
         plan=AssemblyEngine(random_seed=(video_idx+1)*1009).assemble(
             base_path=base_path,
             client_name=client_name,
             audio_duration_seconds=content.audio_duration_seconds,
             materials=fetch.materials,
+            max_duration_seconds=max_duration_seconds,
         )
         assembly_plans.append(plan)
         content_results.append(content)
@@ -436,7 +439,7 @@ class App:
         style_cfg_result=ensure_style_prompt_config()
         self.style_config_recovered=bool(style_cfg_result.get('recovered',False))
         self.style_config_backup_path=str(style_cfg_result.get('backup_path','') or '')
-        self.draft=tk.StringVar(value=cfg.get('draft_box_path','')); self.mix_output=tk.StringVar(value=cfg.get('mix_output_path','output_videos')); self.material=tk.StringVar(value=BASE); self.client=tk.StringVar(value=CLIENT); self.voice=tk.StringVar(value='温柔女声'); self.duration=tk.StringVar(value='30-60'); self.video_count=tk.IntVar(value=1); self.mode=tk.StringVar(value='draft'); self.lang_text=tk.StringVar(value='当前语种：zh'); self.status=tk.StringVar(value='请选择素材后开始生成'); self.script=tk.StringVar(value='生成文案后显示在这里'); self.output=tk.StringVar(value='生成结果会显示在这里'); self.draft_text=tk.StringVar(); self.mix_output_text=tk.StringVar(); self.progress_text=tk.StringVar(value='0%'); self.progress_value=tk.DoubleVar(value=0); self.buttons=[]; self.steps=[]; self.running=False
+        self.draft=tk.StringVar(value=cfg.get('draft_box_path','')); self.mix_output=tk.StringVar(value=cfg.get('mix_output_path','output_videos')); self.material=tk.StringVar(value=BASE); self.client=tk.StringVar(value=CLIENT); self.voice=tk.StringVar(value='温柔女声'); self.duration=tk.StringVar(value='15-30'); self.video_count=tk.IntVar(value=1); self.mode=tk.StringVar(value='draft'); self.lang_text=tk.StringVar(value='当前语种：zh'); self.status=tk.StringVar(value='请选择素材后开始生成'); self.script=tk.StringVar(value='生成文案后显示在这里'); self.output=tk.StringVar(value='生成结果会显示在这里'); self.draft_text=tk.StringVar(); self.mix_output_text=tk.StringVar(); self.progress_text=tk.StringVar(value='0%'); self.progress_value=tk.DoubleVar(value=0); self.buttons=[]; self.steps=[]; self.running=False
         # 文风选择相关
         self.style_keywords=tk.StringVar(value=''); self.selected_style_tags=[]; self.style_display=tk.StringVar(value='请选择文风')
         self._style(); self._ui(); self._refresh_style_preview(); self._refresh_draft(); self._refresh_mix_output(); self._on_voice_changed(); self._show(1); self.root.after(100,self._ensure_draft); self.root.after(200,self._notify_style_config_recovery_if_needed)
