@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -6,6 +6,7 @@ import os
 import random
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,9 @@ MATERIAL_CATEGORIES = {"panorama": "01_工厂全景与大环境", "machine": "02
 IGNORED_FOLDER_NAME = "04_人物实拍（老板&工人）"
 FALLBACK_CATEGORY = "machine"
 PROBE_TIMEOUT_SECONDS = 5.0
+MIN_READY_MATERIALS = 30
+BACKGROUND_RETRY_TIMEOUT_SECONDS = 8.0
+PROBE_CACHE_FILE = ".python_video_engine_probe_cache.json"
 BAD_MATERIALS_FILE = ".python_video_engine_bad_materials.json"
 BLACKLIST_REASONS = {"timeout_error", "nal_error", "aac_decode_error"}
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
@@ -63,12 +67,17 @@ class MaterialFetcher:
         self._scan_done = 0
         self._bad_materials: dict[str, dict[str, str | int]] = {}
         self._bad_state_path: Path | None = None
+        self._probe_cache: dict[str, dict[str, int | float | str]] = {}
+        self._probe_cache_path: Path | None = None
+        self._probe_cache_dirty_count = 0
 
     def fetch(self, base_path: str | Path, client_name: str) -> MaterialFetchResult:
         resolved_base_path = Path(base_path).expanduser().resolve(strict=False)
         logger.info("[MaterialFetcher] 开始扫描客户素材: client=%s path=%s", client_name, resolved_base_path)
         self._bad_state_path = resolved_base_path / BAD_MATERIALS_FILE
         self._bad_materials = self._load_bad_materials(self._bad_state_path)
+        self._probe_cache_path = resolved_base_path / PROBE_CACHE_FILE
+        self._probe_cache = self._load_probe_cache(self._probe_cache_path)
 
         keywords = self._load_keywords(resolved_base_path)
         materials: list[MaterialFileMeta] = []
@@ -93,9 +102,161 @@ class MaterialFetcher:
             counts_by_category[FALLBACK_CATEGORY] = len(pool_materials)
 
         self._save_bad_materials(self._bad_state_path, self._bad_materials)
+        self._save_probe_cache(self._probe_cache_path)
         logger.info("[MaterialFetcher] 扫描完成: keywords=%s total_videos=%s", len(keywords), len(materials))
 
         return MaterialFetchResult(client_name=client_name, base_path=str(resolved_base_path), keywords=keywords, materials=materials, counts_by_category=counts_by_category)
+
+    def fetch_ready_then_background(self, base_path: str | Path, client_name: str, min_ready_materials: int = MIN_READY_MATERIALS) -> MaterialFetchResult:
+        resolved_base_path = Path(base_path).expanduser().resolve(strict=False)
+        logger.info("[MaterialFetcher] 启动快速扫描: client=%s path=%s min_ready=%s", client_name, resolved_base_path, min_ready_materials)
+        self._bad_state_path = resolved_base_path / BAD_MATERIALS_FILE
+        self._bad_materials = self._load_bad_materials(self._bad_state_path)
+        self._probe_cache_path = resolved_base_path / PROBE_CACHE_FILE
+        self._probe_cache = self._load_probe_cache(self._probe_cache_path)
+
+        keywords = self._load_keywords(resolved_base_path)
+        candidates = self._collect_candidates(resolved_base_path)
+        self._prepare_scan_progress([p for _, p in candidates])
+
+        counts_by_category: dict[str, int] = {key: 0 for key in MATERIAL_CATEGORIES}
+        ready_materials: list[MaterialFileMeta] = []
+        delayed_queue: list[tuple[str, Path]] = []
+        ready_target = max(1, int(min_ready_materials))
+
+        for category, file_path in candidates:
+            meta, is_timeout = self._extract_fast_metadata(category, file_path)
+            if meta is not None:
+                ready_materials.append(meta)
+                counts_by_category[category] = counts_by_category.get(category, 0) + 1
+            elif is_timeout:
+                delayed_queue.append((category, file_path))
+            if len(ready_materials) >= ready_target:
+                break
+
+        scanned_count = self._scan_done
+        remaining_candidates = candidates[scanned_count:]
+        logger.info("[MaterialFetcher] 快速扫描完成: ready=%s scanned=%s total=%s delayed=%s", len(ready_materials), scanned_count, len(candidates), len(delayed_queue))
+
+        threading.Thread(target=self._background_scan_worker, args=(remaining_candidates, delayed_queue), daemon=True).start()
+
+        return MaterialFetchResult(client_name=client_name, base_path=str(resolved_base_path), keywords=keywords, materials=ready_materials, counts_by_category=counts_by_category)
+
+    def _background_scan_worker(self, remaining_candidates: list[tuple[str, Path]], delayed_queue: list[tuple[str, Path]]) -> None:
+        if not remaining_candidates and not delayed_queue:
+            return
+        logger.info("[MaterialFetcher] 后台扫描开始: remaining=%s delayed=%s", len(remaining_candidates), len(delayed_queue))
+
+        for category, file_path in remaining_candidates:
+            self._extract_video_metadata(category=category, file_path=file_path)
+
+        for _, file_path in delayed_queue:
+            self._retry_timeout_probe(file_path)
+
+        self._save_bad_materials(self._bad_state_path, self._bad_materials)
+        self._save_probe_cache(self._probe_cache_path)
+        logger.info("[MaterialFetcher] 后台扫描结束")
+
+    def _retry_timeout_probe(self, file_path: Path) -> None:
+        self._notify_scan_progress(file_path.name)
+        absolute_path = str(file_path.resolve(strict=False))
+        bad_record = self._bad_materials.get(absolute_path, {})
+        bad_reason = str(bad_record.get("reason", "")).strip().lower()
+        if bad_reason in BLACKLIST_REASONS:
+            return
+
+        probe_meta = self._probe_with_ffprobe(file_path, timeout_seconds=BACKGROUND_RETRY_TIMEOUT_SECONDS, mark_timeout_bad=True)
+        if probe_meta is not None:
+            return
+
+        self._mark_bad_material(file_path, reason="ffprobe_timeout", detail=f"retry_timeout={BACKGROUND_RETRY_TIMEOUT_SECONDS}")
+
+    def _collect_candidates(self, base_path: Path) -> list[tuple[str, Path]]:
+        has_all_category_dirs = all((base_path / folder_name).is_dir() for folder_name in MATERIAL_CATEGORIES.values())
+        candidates: list[tuple[str, Path]] = []
+        if has_all_category_dirs:
+            for category, folder_name in MATERIAL_CATEGORIES.items():
+                files = self._collect_mp4_files_in_dir(base_path / folder_name)
+                random.shuffle(files)
+                candidates.extend((category, p) for p in files)
+        else:
+            logger.info("[MaterialFetcher] 检测到单目录素材模式，按统一素材池扫描支持格式视频")
+            files = self._collect_mp4_files_recursive(base_path)
+            random.shuffle(files)
+            candidates.extend((FALLBACK_CATEGORY, p) for p in files)
+        return candidates
+
+    def _extract_fast_metadata(self, category: str, file_path: Path) -> tuple[MaterialFileMeta | None, bool]:
+        self._notify_scan_progress(file_path.name)
+        absolute_path = str(file_path.resolve(strict=False))
+
+        bad_record = self._bad_materials.get(absolute_path, {})
+        bad_reason = str(bad_record.get("reason", "")).strip().lower()
+        if bad_reason in BLACKLIST_REASONS:
+            return None, False
+
+        cached = self._read_probe_cache(file_path)
+        if cached is not None:
+            duration_seconds, width, height = cached
+            return MaterialFileMeta(category=category, folder_name=file_path.parent.name, file_name=file_path.name, absolute_path=absolute_path, duration_seconds=duration_seconds, width=width, height=height), False
+
+        probe_meta = self._probe_with_ffprobe(file_path, timeout_seconds=PROBE_TIMEOUT_SECONDS, mark_timeout_bad=False)
+        if probe_meta is None:
+            return None, True
+
+        duration_seconds, width, height, fps = probe_meta
+        self._write_probe_cache(file_path=file_path, duration_seconds=duration_seconds, width=width, height=height, fps=fps)
+        return MaterialFileMeta(category=category, folder_name=file_path.parent.name, file_name=file_path.name, absolute_path=absolute_path, duration_seconds=duration_seconds, width=width, height=height), False
+
+    def _build_cache_key(self, file_path: Path) -> str:
+        stat = file_path.stat()
+        return f"{str(file_path.resolve(strict=False))}|{int(stat.st_size)}|{int(stat.st_mtime)}"
+
+    def _read_probe_cache(self, file_path: Path) -> tuple[float, int, int] | None:
+        try:
+            key = self._build_cache_key(file_path)
+            record = self._probe_cache.get(key)
+            if not isinstance(record, dict):
+                return None
+            duration_seconds = round(float(record.get("duration_seconds", 0.0) or 0.0), 3)
+            width = int(float(record.get("width", 0) or 0))
+            height = int(float(record.get("height", 0) or 0))
+            if duration_seconds <= 0:
+                return None
+            return duration_seconds, width, height
+        except Exception:
+            return None
+
+    def _write_probe_cache(self, file_path: Path, duration_seconds: float, width: int, height: int, fps: float) -> None:
+        try:
+            key = self._build_cache_key(file_path)
+            self._probe_cache[key] = {
+                "duration_seconds": round(float(duration_seconds or 0.0), 3),
+                "width": int(width or 0),
+                "height": int(height or 0),
+                "fps": round(float(fps or 0.0), 3),
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        except Exception:
+            return
+
+    def _load_probe_cache(self, state_path: Path | None) -> dict[str, dict[str, int | float | str]]:
+        if state_path is None or not state_path.exists():
+            return {}
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_probe_cache(self, state_path: Path | None) -> None:
+        if state_path is None:
+            return
+        try:
+            state_path.write_text(json.dumps(self._probe_cache, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._hide_file_if_windows(state_path)
+        except Exception as exc:
+            logger.warning("[MaterialFetcher] 保存探测缓存失败: %s", exc)
 
     def _load_keywords(self, base_path: Path) -> list[str]:
         keyword_file = next((base_path / name for name in ["keywords.txt", "keywords"] if (base_path / name).exists()), None)
@@ -176,7 +337,7 @@ class MaterialFetcher:
 
         probe_meta = self._probe_with_ffprobe(file_path)
         if probe_meta is not None:
-            duration_seconds, width, height = probe_meta
+            duration_seconds, width, height, fps = probe_meta
             return MaterialFileMeta(category=category, folder_name=file_path.parent.name, file_name=file_path.name, absolute_path=absolute_path, duration_seconds=duration_seconds, width=width, height=height)
 
         clip: VideoFileClip | None = None
@@ -195,13 +356,13 @@ class MaterialFetcher:
             if clip is not None:
                 clip.close()
 
-    def _probe_with_ffprobe(self, file_path: Path) -> tuple[float, int, int] | None:
+    def _probe_with_ffprobe(self, file_path: Path, timeout_seconds: float = PROBE_TIMEOUT_SECONDS, mark_timeout_bad: bool = True) -> tuple[float, int, int, float] | None:
         ffprobe = get_ffprobe_path()
         if not ffprobe:
             return None
-        cmd = [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration", "-of", "json", str(file_path)]
+        cmd = [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration,r_frame_rate", "-of", "json", str(file_path)]
         try:
-            completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=PROBE_TIMEOUT_SECONDS, encoding="utf-8", errors="replace")
+            completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout_seconds, encoding="utf-8", errors="replace")
             payload = json.loads(completed.stdout or "{}")
             streams = payload.get("streams", []) if isinstance(payload, dict) else []
             if not streams:
@@ -212,15 +373,30 @@ class MaterialFetcher:
             duration_seconds = round(float(stream.get("duration", 0.0) or 0.0), 3)
             if duration_seconds <= 0:
                 raise ValueError("duration is zero")
-            return duration_seconds, width, height
+            fps = self._parse_fps(str(stream.get("r_frame_rate", "0/1") or "0/1"))
+            return duration_seconds, width, height, fps
         except subprocess.TimeoutExpired:
-            logger.error("[MaterialFetcher] ffprobe 超时，已跳过: file=%s timeout=%.1fs", file_path, PROBE_TIMEOUT_SECONDS)
-            self._mark_bad_material(file_path, reason="ffprobe_timeout", detail=f"timeout={PROBE_TIMEOUT_SECONDS}")
+            logger.error("[MaterialFetcher] ffprobe 超时，已跳过: file=%s timeout=%.1fs", file_path, timeout_seconds)
+            if mark_timeout_bad:
+                self._mark_bad_material(file_path, reason="ffprobe_timeout", detail=f"timeout={timeout_seconds}")
             return None
         except Exception as err:
             logger.warning("[MaterialFetcher] ffprobe 失败，将尝试 moviepy: file=%s err=%s", file_path, err)
             return None
 
+    def _parse_fps(self, raw_rate: str) -> float:
+        try:
+            value = str(raw_rate or "0/1").strip()
+            if "/" in value:
+                a, b = value.split("/", 1)
+                num = float(a or 0.0)
+                den = float(b or 1.0)
+                if den == 0:
+                    return 0.0
+                return round(num / den, 3)
+            return round(float(value), 3)
+        except Exception:
+            return 0.0
     def _mark_bad_material(self, file_path: Path, reason: str, detail: str) -> None:
         key = str(file_path.resolve(strict=False))
         now = datetime.now().isoformat(timespec="seconds")
@@ -273,3 +449,4 @@ class MaterialFetcher:
         if len(values) < 2:
             return 0, 0
         return int(values[0]) if values[0] else 0, int(values[1]) if values[1] else 0
+

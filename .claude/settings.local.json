@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(setx ANTHROPIC_API_KEY \"sk-7ed71f89a17f720f3c3b42f70d52d32a592496f196be7d52dca4f5e6d38b2f59\")"
+    ]
+  }
+}

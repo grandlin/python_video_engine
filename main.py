@@ -442,66 +442,84 @@ class App:
         self.draft=tk.StringVar(value=cfg.get('draft_box_path','')); self.mix_output=tk.StringVar(value=cfg.get('mix_output_path','output_videos')); self.material=tk.StringVar(value=BASE); self.client=tk.StringVar(value=CLIENT); self.voice=tk.StringVar(value='温柔女声'); self.duration=tk.StringVar(value='15-30'); self.video_count=tk.IntVar(value=1); self.mode=tk.StringVar(value='draft'); self.lang_text=tk.StringVar(value='当前语种：zh'); self.status=tk.StringVar(value='请选择素材后开始生成'); self.script=tk.StringVar(value='生成文案后显示在这里'); self.output=tk.StringVar(value='生成结果会显示在这里'); self.draft_text=tk.StringVar(); self.mix_output_text=tk.StringVar(); self.progress_text=tk.StringVar(value='0%'); self.progress_value=tk.DoubleVar(value=0); self.buttons=[]; self.steps=[]; self.running=False
         # 文风选择相关
         self.style_keywords=tk.StringVar(value=''); self.selected_style_tags=[]; self.style_display=tk.StringVar(value='请选择文风')
-        self._style(); self._ui(); self._refresh_style_preview(); self._refresh_draft(); self._refresh_mix_output(); self._on_voice_changed(); self._show(1); self.root.after(100,self._ensure_draft); self.root.after(200,self._notify_style_config_recovery_if_needed)
+        self._style(); self._ui(); self._refresh_style_preview(); self._refresh_draft(); self._refresh_mix_output(); self._on_voice_changed(); self._show(3); self.root.after(100,self._ensure_draft); self.root.after(200,self._notify_style_config_recovery_if_needed)
     def _style(self):
         s=ttk.Style();
         try:s.theme_use('clam')
         except tk.TclError:pass
-        s.configure('P.TFrame',background='#f6f7fb'); s.configure('C.TFrame',background='#ffffff'); s.configure('T1.TLabel',background='#f6f7fb',foreground='#111827',font=('Microsoft YaHei UI',24,'bold')); s.configure('T2.TLabel',background='#f6f7fb',foreground='#6b7280',font=('Microsoft YaHei UI',11)); s.configure('H.TLabel',background='#ffffff',foreground='#111827',font=('Microsoft YaHei UI',15,'bold')); s.configure('B.TLabel',background='#ffffff',foreground='#374151',font=('Microsoft YaHei UI',11)); s.configure('Progress.Horizontal.TProgressbar',thickness=18); s.configure('TLabelframe',background='#ffffff',borderwidth=1,relief='solid'); s.configure('TLabelframe.Label',background='#ffffff',foreground='#374151',font=('Microsoft YaHei UI',10))
+        s.configure('P.TFrame',background='#f6f7fb'); s.configure('C.TFrame',background='#ffffff'); s.configure('T1.TLabel',background='#f6f7fb',foreground='#111827',font=('Microsoft YaHei UI',16,'bold')); s.configure('T2.TLabel',background='#f6f7fb',foreground='#6b7280',font=('Microsoft YaHei UI',10)); s.configure('H.TLabel',background='#ffffff',foreground='#111827',font=('Microsoft YaHei UI',12,'bold')); s.configure('B.TLabel',background='#ffffff',foreground='#374151',font=('Microsoft YaHei UI',10)); s.configure('TButton',font=('Microsoft YaHei UI',10),padding=(8,4)); s.configure('TRadiobutton',font=('Microsoft YaHei UI',10)); s.configure('TEntry',padding=(6,4)); s.configure('TCombobox',padding=(4,2)); s.configure('Progress.Horizontal.TProgressbar',thickness=16); s.configure('TLabelframe',background='#ffffff',borderwidth=1,relief='solid'); s.configure('TLabelframe.Label',background='#ffffff',foreground='#374151',font=('Microsoft YaHei UI',10))
     def _ui(self):
-        w=ttk.Frame(self.root,style='P.TFrame',padding=24); w.pack(fill='both',expand=True); w.columnconfigure(0,weight=1); w.rowconfigure(3,weight=1)
-        h=ttk.Frame(w,style='P.TFrame'); h.grid(row=0,column=0,sticky='ew'); h.columnconfigure(0,weight=1); ttk.Label(h,text='剪映自动剪辑工具',style='T1.TLabel').grid(row=0,column=0,sticky='w'); btns=ttk.Frame(h,style='P.TFrame'); btns.grid(row=0,column=1,sticky='e'); ttk.Button(btns,text='文风提示词设置',command=self._open_style_prompt_settings).grid(row=0,column=0,padx=(0,10)); ttk.Button(btns,text='草稿箱设置',command=self._change_draft).grid(row=0,column=1,padx=(0,10)); ttk.Button(btns,text='混剪输出设置',command=self._change_mix_output).grid(row=0,column=2,padx=(0,10)); ttk.Button(btns,text='音频安全缓冲设置',command=self._open_audio_lead_in_settings).grid(row=0,column=3,padx=(0,10)); ttk.Button(btns,text='打开日志',command=open_log_folder).grid(row=0,column=4); ttk.Label(h,text='素材选择 > 模式设置 > 生成视频',style='T2.TLabel').grid(row=1,column=0,sticky='w',pady=(6,0))
-        c=ttk.Frame(w,style='C.TFrame',padding=14); c.grid(row=1,column=0,sticky='ew',pady=(16,0)); c.columnconfigure(0,weight=1); ttk.Label(c,text='当前剪映草稿箱',style='H.TLabel').grid(row=0,column=0,sticky='w'); ttk.Label(c,textvariable=self.draft_text,style='B.TLabel',wraplength=920).grid(row=1,column=0,sticky='w',pady=(8,0)); ttk.Label(c,text='当前混剪输出路径',style='H.TLabel').grid(row=2,column=0,sticky='w',pady=(12,0)); ttk.Label(c,textvariable=self.mix_output_text,style='B.TLabel',wraplength=920).grid(row=3,column=0,sticky='w',pady=(8,0))
-        bar=ttk.Frame(w,style='C.TFrame',padding=18); bar.grid(row=2,column=0,sticky='ew',pady=(18,0))
-        for i,t in enumerate(['素材选择','模式设置','生成视频'],1): bar.columnconfigure(i,weight=1); f=ttk.Frame(bar,style='C.TFrame'); f.grid(row=0,column=i,sticky='ew',padx=18); cv=tk.Canvas(f,width=44,height=44,bg='#ffffff',highlightthickness=0); ov=cv.create_oval(2,2,42,42,fill='#e5e7eb',outline=''); cv.create_text(22,22,text=str(i),fill='#6b7280',font=('Microsoft YaHei UI',12,'bold')); cv.pack(); lb=ttk.Label(f,text=t,style='B.TLabel'); lb.pack(pady=(8,0)); self.steps.append((cv,ov,lb))
-        self.box=ttk.Frame(w,style='C.TFrame',padding=24); self.box.grid(row=3,column=0,sticky='nsew',pady=(18,0)); self.box.columnconfigure(0,weight=1); self.box.rowconfigure(0,weight=1)
-        self.p1=self._page1(); self.p2=self._page2(); self.p3=self._page3(); [p.grid(row=0,column=0,sticky='nsew') for p in [self.p1,self.p2,self.p3]]
+        self.root.geometry('1280x760'); self.root.minsize(1180,720)
+        w=ttk.Frame(self.root,style='P.TFrame',padding=8); w.pack(fill='both',expand=True); w.columnconfigure(0,weight=1); w.rowconfigure(2,weight=1); w.rowconfigure(3,weight=0)
+
+        h=ttk.Frame(w,style='P.TFrame'); h.grid(row=0,column=0,sticky='ew',pady=(0,4)); h.columnconfigure(0,weight=1)
+        ttk.Label(h,text='剪映自动剪辑工具',style='H.TLabel').grid(row=0,column=0,sticky='w')
+        btns=ttk.Frame(h,style='P.TFrame'); btns.grid(row=0,column=1,sticky='e')
+        ttk.Button(btns,text='文风提示词设置',command=self._open_style_prompt_settings).grid(row=0,column=0,padx=(0,4))
+        ttk.Button(btns,text='剪映草稿箱设置',command=self._change_draft).grid(row=0,column=1,padx=(0,4))
+        ttk.Button(btns,text='混剪输出设置',command=self._change_mix_output).grid(row=0,column=2,padx=(0,4))
+        ttk.Button(btns,text='音频安全缓冲设置',command=self._open_audio_lead_in_settings).grid(row=0,column=3,padx=(0,4))
+        ttk.Button(btns,text='打开日志',command=open_log_folder).grid(row=0,column=4)
+
+        self.box=ttk.Frame(w,style='C.TFrame',padding=8); self.box.grid(row=2,column=0,sticky='nsew',pady=(0,4)); self.box.columnconfigure(0,weight=2); self.box.columnconfigure(1,weight=3); self.box.rowconfigure(0,weight=1)
+        self.left_panel=ttk.Frame(self.box,style='C.TFrame'); self.left_panel.grid(row=0,column=0,sticky='nsew',padx=(0,6)); self.left_panel.columnconfigure(0,weight=1)
+        self.right_panel=ttk.Frame(self.box,style='C.TFrame'); self.right_panel.grid(row=0,column=1,sticky='nsew',padx=(6,0)); self.right_panel.columnconfigure(0,weight=1); self.right_panel.rowconfigure(6,weight=1)
+
+        self.p1=self._page1(); self.p1.grid(row=0,column=0,sticky='ew')
+        self.p2=self._page2(); self.p2.grid(row=1,column=0,sticky='nsew',pady=(6,0))
+
+        action_bar=ttk.Frame(self.left_panel,style='C.TFrame'); action_bar.grid(row=2,column=0,sticky='ew',pady=(8,0)); action_bar.columnconfigure(0,weight=1)
+        self.generate_button=ttk.Button(action_bar,text='开始生成',command=self._run)
+        self.generate_button.grid(row=0,column=0,sticky='w')
+        self.buttons=[self.generate_button]
+
+        self.p3=self._page3(); self.p3.grid(row=0,column=0,sticky='nsew')
+
     def _page1(self):
-        f=ttk.Frame(self.box,style='C.TFrame'); f.columnconfigure(0,weight=1); ttk.Label(f,text='1. 选择素材路径',style='H.TLabel').grid(row=0,column=0,sticky='w'); r=ttk.Frame(f,style='C.TFrame'); r.grid(row=1,column=0,sticky='ew',pady=(16,0)); r.columnconfigure(0,weight=1); ttk.Entry(r,textvariable=self.material).grid(row=0,column=0,sticky='ew',ipady=8,padx=(0,10)); ttk.Button(r,text='浏览素材',command=self._pick_material).grid(row=0,column=1); n=ttk.Frame(f,style='C.TFrame'); n.grid(row=2,column=0,sticky='ew',pady=(16,0)); n.columnconfigure(1,weight=1); ttk.Label(n,text='客户名称',style='B.TLabel').grid(row=0,column=0,padx=(0,10)); ttk.Entry(n,textvariable=self.client).grid(row=0,column=1,sticky='ew',ipady=8); b=ttk.Button(f,text='下一步',command=self._go2); b.grid(row=3,column=0,sticky='e',pady=(24,0)); self.buttons=[b]; return f
+        f=ttk.LabelFrame(self.left_panel,text='基础输入'); f.columnconfigure(1,weight=1)
+        ttk.Label(f,text='素材路径',style='B.TLabel').grid(row=0,column=0,sticky='w',padx=(6,6),pady=(6,4)); ttk.Entry(f,textvariable=self.material).grid(row=0,column=1,sticky='ew',pady=(6,4)); ttk.Button(f,text='浏览',command=self._pick_material).grid(row=0,column=2,padx=(6,6),pady=(6,4))
+        ttk.Label(f,text='客户名称',style='B.TLabel').grid(row=1,column=0,sticky='w',padx=(6,6),pady=(2,4)); ttk.Entry(f,textvariable=self.client).grid(row=1,column=1,sticky='ew',pady=(2,4))
+        ttk.Label(f,text='剪映草稿箱',style='B.TLabel').grid(row=2,column=0,sticky='w',padx=(6,6),pady=(2,4)); ttk.Label(f,textvariable=self.draft_text,style='B.TLabel').grid(row=2,column=1,columnspan=2,sticky='w',pady=(2,4))
+        ttk.Label(f,text='混剪输出',style='B.TLabel').grid(row=3,column=0,sticky='w',padx=(6,6),pady=(2,6)); ttk.Label(f,textvariable=self.mix_output_text,style='B.TLabel').grid(row=3,column=1,columnspan=2,sticky='w',pady=(2,6))
+        return f
+
     def _page2(self):
-        f=ttk.Frame(self.box,style='C.TFrame'); f.columnconfigure(0,weight=1); f.rowconfigure(0,weight=1)
-        canvas=tk.Canvas(f,bg='#ffffff',highlightthickness=0); canvas.grid(row=0,column=0,sticky='nsew'); scrollbar=ttk.Scrollbar(f,orient='vertical',command=canvas.yview); scrollbar.grid(row=0,column=1,sticky='ns'); canvas.configure(yscrollcommand=scrollbar.set)
-        scroll_frame=ttk.Frame(canvas,style='C.TFrame'); canvas_window=canvas.create_window((0,0),window=scroll_frame,anchor='nw')
-        def _configure_scroll(event): canvas.configure(scrollregion=canvas.bbox('all')); canvas.itemconfig(canvas_window,width=event.width)
-        def _on_mousewheel(event): canvas.yview_scroll(int(-1*(event.delta/120)),'units')
-        scroll_frame.bind('<Configure>',_configure_scroll); canvas.bind('<Configure>',_configure_scroll); canvas.bind_all('<MouseWheel>',_on_mousewheel)
-        ttk.Label(scroll_frame,text='2. 选择模式与参数',style='H.TLabel').grid(row=0,column=0,sticky='w',padx=24,pady=(12,0))
-        mode_box=ttk.LabelFrame(scroll_frame,text='生成模式'); mode_box.grid(row=1,column=0,sticky='ew',pady=(12,0),padx=24); mode_frame=ttk.Frame(mode_box,style='C.TFrame'); mode_frame.pack(pady=8,padx=8); ttk.Radiobutton(mode_frame,text='完整视频模式（文案+配音+剪映草稿）',value='draft',variable=self.mode,command=self._on_mode_changed).grid(row=0,column=0,sticky='w',pady=5); ttk.Radiobutton(mode_frame,text='纯混剪模式（无文案无配音，直接MP4）',value='mix',variable=self.mode,command=self._on_mode_changed).grid(row=1,column=0,sticky='w',pady=5)
+        f=ttk.LabelFrame(self.left_panel,text='模式与参数'); f.columnconfigure(1,weight=1)
 
-        # ========== 完整视频模式容器 ==========
-        self.draft_options_container=ttk.Frame(scroll_frame,style='C.TFrame')
-        self.draft_options_container.grid(row=2,column=0,sticky='ew',pady=(12,0),padx=24)
+        ttk.Label(f,text='生成模式',style='B.TLabel').grid(row=0,column=0,sticky='w',padx=(6,8),pady=(6,4))
+        mode_cell=ttk.Frame(f,style='C.TFrame'); mode_cell.grid(row=0,column=1,sticky='ew',pady=(6,4))
+        ttk.Radiobutton(mode_cell,text='完整视频',value='draft',variable=self.mode,command=self._on_mode_changed).grid(row=0,column=0,sticky='w',padx=(0,10))
+        ttk.Radiobutton(mode_cell,text='纯混剪',value='mix',variable=self.mode,command=self._on_mode_changed).grid(row=0,column=1,sticky='w')
 
-        # 三列并排：文风选择 | 声音选择 | 视频时长
-        self.options_row=ttk.Frame(self.draft_options_container,style='C.TFrame'); self.options_row.grid(row=0,column=0,sticky='ew',pady=(0,0)); self.options_row.columnconfigure(0,weight=2); self.options_row.columnconfigure(1,weight=3); self.options_row.columnconfigure(2,weight=1)
-
-        # 第一列：声音选择
-        self.voice_container=ttk.LabelFrame(self.options_row,text='声音选择（仅完整视频模式）'); self.voice_container.grid(row=0,column=1,sticky='nsew',padx=10); voice_inner=ttk.Frame(self.voice_container,style='C.TFrame'); voice_inner.pack(fill='both',expand=True,pady=6,padx=6); voice_inner.columnconfigure(0,weight=1); voice_inner.columnconfigure(1,weight=1); zh_box=ttk.LabelFrame(voice_inner,text='中文声音 (zh-CN)'); zh_box.grid(row=0,column=0,sticky='nsew',padx=(0,5)); [ttk.Radiobutton(zh_box,text=k,value=k,variable=self.voice,command=self._on_voice_changed).grid(row=i,column=0,sticky='w',pady=4,padx=4) for i,k in enumerate(ZH_VOICES)]; en_box=ttk.LabelFrame(voice_inner,text='English Voices'); en_box.grid(row=0,column=1,sticky='nsew',padx=(5,0)); [ttk.Radiobutton(en_box,text=k,value=k,variable=self.voice,command=self._on_voice_changed).grid(row=i,column=0,sticky='w',pady=4,padx=4) for i,k in enumerate(EN_VOICES)]; lang_label=ttk.Label(self.voice_container,textvariable=self.lang_text,style='B.TLabel'); lang_label.pack(anchor='w',pady=(6,0))
-
-        # 第二列：文风选择
-        style_container=ttk.LabelFrame(self.options_row,text='文风选择'); style_container.grid(row=0,column=0,sticky='nsew',padx=(0,10)); style_inner=ttk.Frame(style_container,style='C.TFrame'); style_inner.pack(fill='both',expand=True,pady=6,padx=6)
+        ttk.Label(f,text='文风添加',style='B.TLabel').grid(row=1,column=0,sticky='w',padx=(6,8),pady=4)
+        style_cell=ttk.Frame(f,style='C.TFrame'); style_cell.grid(row=1,column=1,sticky='ew',pady=4)
         style_options=['实力品控','核心产品','诚邀合作','定制研发','高效交付']
-        for idx,style_text in enumerate(style_options):
-            btn=ttk.Button(style_inner,text=style_text,command=lambda k=style_text: self._on_style_toggled(k))
-            if idx<3: btn.grid(row=0,column=idx,sticky='w',pady=3,padx=5)
-            else: btn.grid(row=1,column=idx-3,sticky='w',pady=3,padx=5)
+        for idx,style_text in enumerate(style_options): ttk.Button(style_cell,text=style_text,command=lambda k=style_text: self._on_style_toggled(k)).grid(row=0,column=idx,sticky='w',padx=(0,4))
 
-        # 第三列：视频时长
-        duration_container=ttk.LabelFrame(self.options_row,text='视频时长'); duration_container.grid(row=0,column=2,sticky='nsew',padx=(10,0)); dur_frame=ttk.Frame(duration_container,style='C.TFrame'); dur_frame.pack(pady=6,padx=6,fill='both',expand=True); ttk.Radiobutton(dur_frame,text='15-30秒',value='15-30',variable=self.duration).pack(anchor='w',pady=5,padx=5); ttk.Radiobutton(dur_frame,text='30-60秒',value='30-60',variable=self.duration).pack(anchor='w',pady=5,padx=5)
+        ttk.Label(f,text='已选文风',style='B.TLabel').grid(row=2,column=0,sticky='w',padx=(6,8),pady=4)
+        self.style_preview_box=tk.Frame(f,bg='#eef8ff',relief='solid',bd=1); self.style_preview_box.grid(row=2,column=1,sticky='ew',pady=4)
+        self.style_preview_inner=tk.Frame(self.style_preview_box,bg='#eef8ff'); self.style_preview_inner.pack(fill='both',expand=True,padx=4,pady=2)
 
-        # 底部提示：即将生成的文风（放在按钮上方）
-        style_tip=ttk.Label(self.draft_options_container,text='即将生成以下文风的视频：',style='B.TLabel'); style_tip.grid(row=1,column=0,sticky='w',pady=(12,4))
-        self.style_preview_box=tk.Frame(self.draft_options_container,height=50,bg='#fff3cd',relief='solid',bd=1); self.style_preview_box.grid(row=2,column=0,sticky='ew',pady=(0,8)); self.style_preview_inner=tk.Frame(self.style_preview_box,bg='#fff3cd'); self.style_preview_inner.pack(fill='both',expand=True,pady=6,padx=6)
+        self.draft_options_container=ttk.Frame(f,style='C.TFrame'); self.draft_options_container.grid(row=3,column=0,columnspan=2,sticky='ew')
+        self.draft_options_container.columnconfigure(1,weight=1)
+        ttk.Label(self.draft_options_container,text='声音',style='B.TLabel').grid(row=0,column=0,sticky='w',padx=(6,8),pady=4)
+        voice_values=list(ZH_VOICES.keys())+list(EN_VOICES.keys())
+        voice_row=ttk.Frame(self.draft_options_container,style='C.TFrame')
+        voice_row.grid(row=0,column=1,sticky='w',pady=4)
+        voice_cb=ttk.Combobox(voice_row,textvariable=self.voice,values=voice_values,state='readonly',width=32)
+        voice_cb.grid(row=0,column=0,sticky='w'); voice_cb.bind('<<ComboboxSelected>>',self._on_voice_changed)
+        ttk.Label(voice_row,textvariable=self.lang_text,style='B.TLabel').grid(row=0,column=1,sticky='w',padx=(12,0))
 
-        # ========== 纯混剪模式容器 ==========
-        self.mix_options_container=ttk.Frame(scroll_frame,style='C.TFrame')
+        ttk.Label(self.draft_options_container,text='视频时长',style='B.TLabel').grid(row=1,column=0,sticky='w',padx=(6,8),pady=4)
+        dur_cell=ttk.Frame(self.draft_options_container,style='C.TFrame'); dur_cell.grid(row=1,column=1,sticky='w',pady=4)
+        ttk.Radiobutton(dur_cell,text='15-30秒',value='15-30',variable=self.duration).grid(row=0,column=0,sticky='w',padx=(0,8))
+        ttk.Radiobutton(dur_cell,text='30-60秒',value='30-60',variable=self.duration).grid(row=0,column=1,sticky='w')
 
-        # 视频时长和生成数量并排
-        mix_inner=ttk.Frame(self.mix_options_container,style='C.TFrame'); mix_inner.pack(fill='x',pady=12,padx=0); mix_inner.columnconfigure(0,weight=1); mix_inner.columnconfigure(1,weight=1)
-        duration_box=ttk.LabelFrame(mix_inner,text='视频时长'); duration_box.grid(row=0,column=0,sticky='nsew',padx=(0,10)); dur_frame=ttk.Frame(duration_box,style='C.TFrame'); dur_frame.pack(pady=8,padx=8); ttk.Radiobutton(dur_frame,text='15-30秒',value='15-30',variable=self.duration).grid(row=0,column=0,padx=10,pady=5); ttk.Radiobutton(dur_frame,text='30-60秒',value='30-60',variable=self.duration).grid(row=0,column=1,padx=10,pady=5)
-        count_box=ttk.LabelFrame(mix_inner,text='生成数量'); count_box.grid(row=0,column=1,sticky='nsew',padx=(10,0)); count_frame=ttk.Frame(count_box,style='C.TFrame'); count_frame.pack(pady=8,padx=8); ttk.Label(count_frame,text='生成视频数量:',style='B.TLabel').grid(row=0,column=0,padx=(0,10)); count_spinbox=ttk.Spinbox(count_frame,from_=1,to=10,textvariable=self.video_count,width=10); count_spinbox.grid(row=0,column=1)
+        self.mix_options_container=ttk.Frame(f,style='C.TFrame'); self.mix_options_container.grid(row=4,column=0,columnspan=2,sticky='ew')
+        ttk.Label(self.mix_options_container,text='混剪数量',style='B.TLabel').grid(row=0,column=0,sticky='w',padx=(6,8),pady=4)
+        ttk.Spinbox(self.mix_options_container,from_=1,to=10,textvariable=self.video_count,width=8).grid(row=0,column=1,sticky='w',pady=4)
 
-        foot=ttk.Frame(scroll_frame,style='C.TFrame'); foot.grid(row=5,column=0,sticky='ew',pady=(12,12),padx=24); foot.columnconfigure(1,weight=1); b1=ttk.Button(foot,text='上一步',command=lambda:self._show(1)); b2=ttk.Button(foot,text='下一步',command=lambda:self._show(3)); b1.grid(row=0,column=0,sticky='w'); b2.grid(row=0,column=1,sticky='e'); self.buttons=[b1,b2]; self._on_mode_changed(); return f
+        self._on_mode_changed(); return f
 
     def _on_style_toggled(self,keyword):
         if len(self.selected_style_tags) >= STYLE_TAG_LIMIT:
@@ -530,15 +548,117 @@ class App:
         self.style_preview_box.config(bg='#eef8ff')
         self.style_preview_inner.config(bg='#eef8ff')
 
-        row_frame=tk.Frame(self.style_preview_inner,bg='#eef8ff')
-        row_frame.pack(anchor='w',fill='x')
+        tag_wrap=tk.Frame(self.style_preview_inner,bg='#eef8ff')
+        tag_wrap.pack(anchor='w',fill='x')
 
+        max_cols=4
         for idx,tag in enumerate(self.selected_style_tags):
-            tag_btn=tk.Button(row_frame,text=f'{tag} ✕',relief='flat',bd=0,bg='#0ea5e9',fg='white',activebackground='#0284c7',activeforeground='white',font=('Microsoft YaHei UI',10),padx=8,pady=2,cursor='hand2',command=lambda i=idx: self._remove_style_tag(i))
-            tag_btn.pack(side='left',padx=(0,6),pady=2)
+            r=idx//max_cols
+            c=idx%max_cols
+            tag_btn=tk.Button(tag_wrap,text=f'{tag} ✕',relief='flat',bd=0,bg='#0ea5e9',fg='white',activebackground='#0284c7',activeforeground='white',font=('Microsoft YaHei UI',10),padx=8,pady=2,cursor='hand2',command=lambda i=idx: self._remove_style_tag(i))
+            tag_btn.grid(row=r,column=c,sticky='w',padx=(0,8),pady=4)
+
     def _page3(self):
-        f=ttk.Frame(self.box,style='C.TFrame'); f.columnconfigure(0,weight=1); top=ttk.Frame(f,style='C.TFrame'); top.grid(row=0,column=0,sticky='ew',pady=(0,12)); top.columnconfigure(0,weight=3); top.columnconfigure(1,weight=2); top.columnconfigure(2,weight=2); top.columnconfigure(3,weight=3); b1=ttk.Button(top,text='上一步',command=lambda:self._show(2)); b2=ttk.Button(top,text='生成草稿',command=self._run); b1.grid(row=0,column=1,sticky='w'); b2.grid(row=0,column=2,sticky='e'); self.buttons=[b1,b2]; ttk.Label(f,text='3. 生成草稿',style='H.TLabel').grid(row=1,column=0,sticky='w'); self.summary=ttk.Label(f,text='-',style='B.TLabel',wraplength=900,justify='left'); self.summary.grid(row=2,column=0,sticky='w',pady=(8,16)); pw=ttk.Frame(f,style='C.TFrame'); pw.grid(row=3,column=0,sticky='ew'); pw.columnconfigure(0,weight=1); ttk.Progressbar(pw,mode='determinate',maximum=100,variable=self.progress_value,style='Progress.Horizontal.TProgressbar').grid(row=0,column=0,sticky='ew'); ttk.Label(pw,textvariable=self.progress_text,style='B.TLabel').grid(row=0,column=1,padx=(12,0)); ttk.Label(f,textvariable=self.status,style='B.TLabel').grid(row=4,column=0,sticky='w',pady=(10,18)); ttk.Label(f,text='文案预览',style='H.TLabel').grid(row=5,column=0,sticky='w'); ttk.Label(f,textvariable=self.script,style='B.TLabel',wraplength=900,justify='left').grid(row=6,column=0,sticky='w',pady=(8,18)); ttk.Label(f,text='草稿输出',style='H.TLabel').grid(row=7,column=0,sticky='w'); ttk.Label(f,textvariable=self.output,style='B.TLabel',wraplength=900,justify='left').grid(row=8,column=0,sticky='w',pady=(8,0)); return f
-    def _on_voice_changed(self):
+        f=ttk.Frame(self.right_panel,style='C.TFrame'); f.columnconfigure(0,weight=1); f.rowconfigure(4,weight=1)
+        pw=ttk.Frame(f,style='C.TFrame'); pw.grid(row=1,column=0,sticky='ew',pady=(0,4)); pw.columnconfigure(0,weight=1)
+        ttk.Progressbar(pw,mode='determinate',maximum=100,variable=self.progress_value,style='Progress.Horizontal.TProgressbar').grid(row=0,column=0,sticky='ew')
+        ttk.Label(pw,textvariable=self.progress_text,style='B.TLabel').grid(row=0,column=1,padx=(8,0))
+        ttk.Label(f,textvariable=self.status,style='B.TLabel').grid(row=2,column=0,sticky='w',pady=(0,4))
+
+        log=ttk.LabelFrame(f,text='控制台输出'); log.grid(row=4,column=0,sticky='nsew'); log.columnconfigure(0,weight=1); log.rowconfigure(0,weight=1)
+        text=tk.Text(log,height=18,bg='#0b1020',fg='#c9d1d9',insertbackground='#c9d1d9',font=('Consolas',10),wrap='word')
+        text.grid(row=0,column=0,sticky='nsew')
+        scroll=ttk.Scrollbar(log,orient='vertical',command=text.yview); scroll.grid(row=0,column=1,sticky='ns'); text.configure(yscrollcommand=scroll.set)
+        ttk.Label(log,text='文案与输出：',style='B.TLabel').grid(row=1,column=0,sticky='w',pady=(4,0))
+        preview_wrap=tk.Frame(log,bg='#0b1020',highlightthickness=1,highlightbackground='#30363d')
+        preview_wrap.grid(row=2,column=0,columnspan=2,sticky='nsew',pady=(4,0))
+        log.rowconfigure(2,weight=1)
+        preview_text=tk.Text(preview_wrap,height=8,bg='#0b1020',fg='#c9d1d9',insertbackground='#c9d1d9',font=('Consolas',10),wrap='word',relief='flat',bd=0,padx=8,pady=6)
+        preview_text.grid(row=0,column=0,sticky='nsew')
+        preview_scroll=ttk.Scrollbar(preview_wrap,orient='vertical',command=preview_text.yview)
+        preview_scroll.grid(row=0,column=1,sticky='ns')
+        preview_wrap.columnconfigure(0,weight=1); preview_wrap.rowconfigure(0,weight=1)
+        preview_text.configure(yscrollcommand=preview_scroll.set)
+
+        preview_menu=tk.Menu(preview_text,tearoff=0)
+
+        def _copy_preview_text():
+            try:
+                selected=preview_text.selection_get()
+            except Exception:
+                selected=''
+            if not selected:
+                selected=preview_text.get('1.0','end-1c')
+            if selected:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(selected)
+            preview_menu.unpost()
+
+        def _select_all_preview_text():
+            preview_text.tag_add('sel','1.0','end-1c')
+            preview_text.mark_set('insert','1.0')
+            preview_text.see('insert')
+            preview_menu.unpost()
+
+        def _deselect_preview_text():
+            preview_text.tag_remove('sel','1.0','end')
+            preview_menu.unpost()
+
+        def _show_preview_menu(event):
+            try:
+                preview_menu.tk_popup(event.x_root,event.y_root)
+            finally:
+                preview_menu.grab_release()
+            return 'break'
+
+        def _hide_preview_menu(_event=None):
+            try:
+                preview_menu.unpost()
+            except Exception:
+                pass
+
+        preview_menu.add_command(label='复制 (Copy)',command=_copy_preview_text)
+        preview_menu.add_command(label='全选 (Select All)',command=_select_all_preview_text)
+        preview_menu.add_command(label='取消选择 (Deselect)',command=_deselect_preview_text)
+
+        preview_text.bind('<Button-3>',_show_preview_menu)
+        preview_text.bind('<FocusOut>',_hide_preview_menu)
+        self.root.bind('<Button-1>',_hide_preview_menu,add='+')
+
+        text.tag_configure('ansi_info',foreground='#7ee787')
+        text.tag_configure('ansi_warn',foreground='#ffd866')
+        text.tag_configure('ansi_err',foreground='#ff7b72')
+        text.tag_configure('ansi_dim',foreground='#8b949e')
+
+        def _sync_console(*_):
+            text.delete('1.0','end')
+            header=f"[{self.progress_text.get()}] {self.status.get()}\n"
+            text.insert('end',header,'ansi_info')
+            text.insert('end','-'*72+'\n','ansi_dim')
+            out=self.output.get().strip()
+            if out:
+                for line in out.splitlines():
+                    lower=line.lower()
+                    if ('失败' in line) or ('error' in lower) or ('异常' in line):
+                        text.insert('end',line+'\n','ansi_err')
+                    elif ('跳过' in line) or ('warning' in lower) or ('warn' in lower):
+                        text.insert('end',line+'\n','ansi_warn')
+                    else:
+                        text.insert('end',line+'\n')
+            else:
+                text.insert('end','生成结果会显示在这里\n','ansi_dim')
+            text.see('end')
+
+            preview_text.config(state='normal')
+            preview_text.delete('1.0','end')
+            preview_text.insert('end','文案：\n')
+            preview_text.insert('end',(self.script.get() or '生成文案后显示在这里')+'\n\n')
+            preview_text.insert('end','输出：\n')
+            preview_text.insert('end',(self.output.get() or '生成结果会显示在这里')+'\n')
+            preview_text.config(state='disabled')
+        self.status.trace_add('write',_sync_console); self.output.trace_add('write',_sync_console); self.progress_text.trace_add('write',_sync_console); self.script.trace_add('write',_sync_console); _sync_console()
+        return f
+    def _on_voice_changed(self,*_):
         global targetLanguage
         targetLanguage=resolve_target_language_by_voice_label(self.voice.get().strip()); self.lang_text.set(f'当前语种：{targetLanguage}')
     def _on_mode_changed(self):
@@ -691,24 +811,9 @@ class App:
     def _ensure_draft(self):
         return
     def _show(self,n):
-        [self.p1,self.p2,self.p3][n-1].tkraise()
-        if n==3:
-            mode_text='完整视频模式' if self.mode.get()=='draft' else '纯混剪模式'
-            output_path=self.draft.get() if self.mode.get()=='draft' else self.mix_output.get()
-            selected_styles=list(self.selected_style_tags)
-            styles_text=' + '.join(selected_styles) if selected_styles else '未选择'
-            self.summary.config(text=f'生成模式：{mode_text}\n输出路径：{output_path or "未设置"}\n素材目录：{self.material.get() or "未选择"}\n客户名称：{self.client.get() or "未填写"}\n声音风格：{self.voice.get() if self.mode.get()=="draft" else "无（混剪模式）"}\n文风选择：{styles_text}\n视频时长：{self.duration.get()}秒\n目标语种：{targetLanguage if self.mode.get()=="draft" else "无"}')
-        for i,(c,o,l) in enumerate(self.steps,1): c.itemconfigure(o,fill='#111827' if i<=n else '#e5e7eb'); c.itemconfigure(2,fill='#ffffff' if i<=n else '#6b7280'); l.configure(foreground='#111827' if i<=n else '#6b7280')
+        return
     def _go2(self):
-        mode=self.mode.get()
-        if mode=='draft' and not self.draft.get().strip(): messagebox.showwarning('提示','完整视频模式需要先设置剪映草稿箱路径。'); return
-        if mode=='mix' and not self.mix_output.get().strip(): messagebox.showwarning('提示','纯混剪模式需要先设置混剪输出路径。'); return
-        p=self.material.get().strip()
-        if not p: messagebox.showwarning('提示','请先选择素材目录。'); return
-        miss=check_material(p)
-        if miss: messagebox.showwarning('目录结构不完整','缺少目录：\n'+'\n'.join(miss)); return
-        if not self.client.get().strip(): messagebox.showwarning('提示','请填写客户名称。'); return
-        self._show(2)
+        return
     def _set_busy(self,b): self.running=b; [x.configure(state='disabled' if b else 'normal') for x in self.buttons]
     def _report_progress(self,v,t): self.root.after(0,lambda:self._set_progress(v,t))
     def _run(self):

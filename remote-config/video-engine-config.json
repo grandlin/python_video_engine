@@ -1,11 +1,11 @@
 {
-  "version": "2026.05.12.1",
+  "version": "2026.04.24.1",
   "llm": {
-    "api_url": "https://python-video-engine-57pd.vercel.app/api/chat",
-    "model": "qwen-plus",
-    "timeout_seconds": 120,
-    "api_key_env": "",
-    "requires_api_key": false,
+    "api_url": "https://api.siliconflow.cn/v1",
+    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "timeout_seconds": 90,
+    "api_key_env": "SILICONFLOW_API_KEY",
+    "requires_api_key": true,
     "system_prompt": "你擅长撰写中文外贸工厂短视频口播文案。",
     "script_language": "zh-CN",
     "translation_enabled": false
