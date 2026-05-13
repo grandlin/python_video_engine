@@ -169,10 +169,12 @@ class DraftRenderer:
         clip_count=len(plan.clips)
         clip_index=0
         while clip_count>0 and cursor<max_visual_cursor:
-            clip=plan.clips[clip_index % clip_count]
             remaining=max_visual_cursor-cursor
             if remaining<=0:
                 break
+            if remaining<=tail_buffer_ticks and len(vseg)>0:
+                break
+            clip=plan.clips[clip_index % clip_count]
             source_ct=max(self._seconds_to_ticks(clip.clip_duration_seconds),1)
             ct=max(min(source_ct,remaining),1)
             max_shift=max(min(clip.clip_duration_seconds*0.12,0.18),0.0)
@@ -185,6 +187,45 @@ class DraftRenderer:
             vseg.append({"id":self._uuid(),"material_id":vid,"target_timerange":{"start":cursor,"duration":ct},"source_timerange":{"start":st,"duration":min(ct,source_ct)},"extra_material_refs":[cid,sid,spid],"clip":{"alpha":1.0,"flip":{"horizontal":False,"vertical":False},"rotation":0.0,"scale":{"x":scale_x,"y":scale_y},"transform":{"x":0.0,"y":0.0}},"common_keyframes":[],"enable_adjust":True,"is_placeholder":False,"speed":1.0,"visible":True,"volume":0.0})
             cursor+=ct
             clip_index+=1
+
+        remaining_after_fill=max_visual_cursor-cursor
+        if remaining_after_fill>0 and len(vseg)>0:
+            last_seg=vseg[-1]
+            last_video_id=last_seg.get("material_id")
+            last_video_mat=None
+            for m in videos:
+                if m.get("id")==last_video_id:
+                    last_video_mat=m
+                    break
+            if last_video_mat is not None:
+                source_total=max(int(last_video_mat.get("duration") or 0),1)
+                current_source_start=int(last_seg["source_timerange"].get("start") or 0)
+                current_source_duration=max(int(last_seg["source_timerange"].get("duration") or 0),1)
+                current_target_duration=max(int(last_seg["target_timerange"].get("duration") or 0),1)
+
+                source_room=max(source_total-(current_source_start+current_source_duration),0)
+                extend_from_source=min(int(remaining_after_fill),source_room)
+                if extend_from_source>0:
+                    last_seg["source_timerange"]["duration"]=current_source_duration+extend_from_source
+                    last_seg["target_timerange"]["duration"]=current_target_duration+extend_from_source
+                    current_source_duration+=extend_from_source
+                    current_target_duration+=extend_from_source
+                    cursor+=extend_from_source
+
+                still_remaining=max_visual_cursor-cursor
+                if still_remaining>0:
+                    new_target_duration=current_target_duration+int(still_remaining)
+                    if new_target_duration>0:
+                        new_speed=max(current_source_duration/new_target_duration,0.01)
+                        last_seg["target_timerange"]["duration"]=new_target_duration
+                        last_seg["speed"]=round(new_speed,6)
+                        for ref_id in last_seg.get("extra_material_refs",[]):
+                            for speed_item in speeds:
+                                if speed_item.get("id")==ref_id and speed_item.get("type")=="speed":
+                                    speed_item["speed"]=round(new_speed,6)
+                                    break
+                        cursor=max_visual_cursor
+
         self._apply_fade_out(vseg)
         total=max(total,cursor)
         return {"id":self._uuid(),"new_version":"","name":f"{plan.client_name}_AI初稿","duration":total,"fps":DEFAULT_FPS,"color_space":0,"canvas_config":{"ratio":"9:16","width":DEFAULT_CANVAS_WIDTH,"height":DEFAULT_CANVAS_HEIGHT},"config":{"maintrack_adsorb":True,"material_save_mode":0,"subtitle_sync":True,"lyrics_sync":False,"video_mute":False},"keyframes":{"adjusts":[],"audios":[],"effects":[],"filters":[],"texts":[],"videos":[]},"materials":{"videos":videos,"audios":audios,"texts":[],"canvases":canvases,"effects":[],"transitions":[],"video_effects":[],"sound_channel_mappings":sound_maps,"speeds":speeds,"audio_fades":audio_fades},"tracks":[{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"视频主轨","type":"video","segments":vseg},{"id":self._uuid(),"attribute":0,"flag":0,"is_default_name":False,"name":"音频轨","type":"audio","segments":aseg}],"platform":{"os":"windows","app":"jianying_pro"},"last_modified_platform":{"os":"windows","app":"jianying_pro"},"version":DEFAULT_DRAFT_VERSION,"path":"","uneven_animation_template_info":{},"smart_ads_info":{},"function_assistant_info":{"fps":{}},"created_at":self._now_iso(),"updated_at":self._now_iso()}
