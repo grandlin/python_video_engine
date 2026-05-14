@@ -20,3 +20,16 @@ output_drafts/
 temp_assets/
 
 .python_video_engine_runtime_config.json
+
+# PyInstaller 打包产生的临时文件夹和配置文件
+build/
+dist/
+*.spec
+
+# 运行产生的本地日志文件
+*.log
+
+# Python 运行时产生的缓存垃圾
+__pycache__/
+.python_video_engine_bad_materials.json
+.python_video_engine_probe_cache.json
