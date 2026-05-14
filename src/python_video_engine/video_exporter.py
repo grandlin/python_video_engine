@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +21,12 @@ CLIP_DECODE_TIMEOUT_SECONDS = 4.0
 PRECHECK_PER_FILE_TIMEOUT_SECONDS = 15.0
 CLIP_EXTRACT_TIMEOUT_SECONDS = 15.0
 FINAL_CONCAT_TIMEOUT_SECONDS = 600.0
+
+
+def _subprocess_no_window_kwargs() -> dict:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 @dataclass(slots=True)
@@ -133,6 +140,7 @@ class VideoExporter:
                     timeout=FINAL_CONCAT_TIMEOUT_SECONDS,
                     encoding="utf-8",
                     errors="replace",
+                    **_subprocess_no_window_kwargs(),
                 )
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError(f"最终拼接超时: {exc}") from exc
@@ -182,6 +190,7 @@ class VideoExporter:
                 timeout=CLIP_EXTRACT_TIMEOUT_SECONDS,
                 encoding="utf-8",
                 errors="replace",
+                **_subprocess_no_window_kwargs(),
             )
             return (out.exists() and out.stat().st_size > 0), False
         except subprocess.TimeoutExpired:
@@ -210,6 +219,7 @@ class VideoExporter:
                 timeout=CLIP_PROBE_TIMEOUT_SECONDS,
                 encoding="utf-8",
                 errors="replace",
+                **_subprocess_no_window_kwargs(),
             )
             payload = json.loads(completed.stdout or "{}")
             streams = payload.get("streams", []) if isinstance(payload, dict) else []
@@ -233,6 +243,7 @@ class VideoExporter:
                 timeout=CLIP_DECODE_TIMEOUT_SECONDS,
                 encoding="utf-8",
                 errors="replace",
+                **_subprocess_no_window_kwargs(),
             )
             return True
         except Exception:
@@ -244,7 +255,7 @@ class VideoExporter:
             return 0.0
         cmd = [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", path]
         try:
-            completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=5, encoding="utf-8", errors="replace")
+            completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=5, encoding="utf-8", errors="replace", **_subprocess_no_window_kwargs())
             payload = json.loads(completed.stdout or "{}")
             fmt = payload.get("format", {}) if isinstance(payload, dict) else {}
             return round(float(fmt.get("duration", 0.0) or 0.0), 3)

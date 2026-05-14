@@ -9,16 +9,39 @@ from pathlib import Path
 from pprint import pprint
 from tkinter import filedialog,messagebox,ttk
 
-# 配置日志输出到控制台
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# 配置日志输出到控制台 + 本地文件
+_LOG_FORMAT = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+_LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
+_log_dir = Path.home() / '.python_video_engine' / 'logs'
+_log_dir.mkdir(parents=True, exist_ok=True)
+_log_file = _log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
+
+_root_logger = logging.getLogger()
+_root_logger.setLevel(logging.INFO)
+_root_logger.handlers.clear()
+
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+
+_file_handler = logging.FileHandler(str(_log_file), encoding='utf-8')
+_file_handler.setLevel(logging.DEBUG)
+_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+
+_root_logger.addHandler(_console_handler)
+_root_logger.addHandler(_file_handler)
+
 logger = logging.getLogger(__name__)
+
+
+def _global_excepthook(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logger.critical("发生全局未捕获异常", exc_info=(exc_type, exc_value, exc_traceback))
+
+
+sys.excepthook = _global_excepthook
 
 
 def _install_audioop_compat() -> None:
@@ -58,7 +81,7 @@ from src.python_video_engine.ffmpeg_runtime import get_ffmpeg_path, get_ffprobe_
 from src.python_video_engine.runtime_config import USER_SETTINGS_PATH, cleanup_legacy_secret_cache, get_config_value, get_runtime_config
 from src.python_video_engine.network import ProxySettings, check_tcp_connectivity, get_default_log_dir
 
-APP_RUNTIME_DIR = Path.home()/'.jianying_auto_editor'
+APP_RUNTIME_DIR = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else (Path.home()/'.jianying_auto_editor')
 APP_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -89,6 +112,11 @@ def _build_precheck_progress_adapter(progress, video_idx: int, video_count: int)
         progress(stage_value + video_idx * 90 // video_count, f"第 {video_idx+1}/{video_count} 个：预检片段可读性 {done}/{total}（{current}）")
 
     return _cb
+
+
+def _normalize_windows_user_path(raw_path: str | Path) -> Path:
+    normalized = os.path.normpath(str(raw_path).strip())
+    return Path(normalized).expanduser().resolve(strict=False)
 
 
 def _load_env_for_runtime() -> None:
@@ -328,6 +356,7 @@ def move_draft(src,dst_root):
     return moved_dst
 def run_pipeline_mix(base_path,client_name,target_duration_seconds=30,output_dir=None,progress=None,video_count=1):
     import time,random
+    base_path = _normalize_windows_user_path(base_path)
     _rehabilitate_transient_blacklist(Path(base_path))
     results=[]
     for video_idx in range(video_count):
@@ -366,14 +395,14 @@ def run_pipeline(base_path, client_name, voice_key=None, draft_box=None, progres
     tags=[str(x).strip() for x in (style_tags or []) if str(x).strip()]
     if not tags:
         raise RuntimeError('请至少选择 1 个文风标签后再生成。')
-    min_ready_materials=max(1,int(get_config_value('scan','min_ready_materials',default=30) or 30))
+    base_path = _normalize_windows_user_path(base_path)
     generator=ContentGenerator(voice_key=voice_key,target_language=target_language,target_duration=target_duration,random_seed=0)
     fetcher=MaterialFetcher(progress_callback=_build_scan_progress_adapter(progress, 0, 1))
-    fetch=fetcher.fetch_ready_then_background(base_path=base_path,client_name=client_name,min_ready_materials=min_ready_materials)
-    if len(fetch.materials) < min_ready_materials:
-        raise RuntimeError(f'可用素材不足，当前仅 {len(fetch.materials)} 条，未达到最小可开工阈值 {min_ready_materials}。')
+    fetch=fetcher.fetch_ready_then_background(base_path=base_path,client_name=client_name)
+    if len(fetch.materials) <= 0:
+        raise RuntimeError('可用素材为 0 条，无法继续生成。')
     if progress:
-        progress(20,f'素材快速扫描完成，可用 {len(fetch.materials)} 条，已达到可开工阈值，继续生成...')
+        progress(20,f'素材快速扫描完成，可用 {len(fetch.materials)} 条，继续生成...')
 
     assembly_plans=[]
     content_results=[]

@@ -8,21 +8,28 @@ from pathlib import Path
 _FFMPEG_REL = Path("third_party") / "ffmpeg" / "windows-x64"
 
 
+def _runtime_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
 def _candidate_binaries(name: str) -> list[Path]:
     candidates: list[Path] = []
 
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(Path(meipass) / _FFMPEG_REL / f"{name}.exe")
-
-    repo_root = Path(__file__).resolve().parents[2]
-    candidates.append(repo_root / _FFMPEG_REL / f"{name}.exe")
-
     if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
         exe_dir = Path(sys.executable).resolve().parent
-        candidates.append(exe_dir / _FFMPEG_REL / f"{name}.exe")
-        candidates.append(exe_dir / f"{name}.exe")
 
+        if meipass:
+            candidates.append(Path(meipass) / f"{name}.exe")
+        candidates.append(exe_dir / "JianyingAutoEditor_lib" / f"{name}.exe")
+        candidates.append(exe_dir / f"{name}.exe")
+        return candidates
+
+    base_dir = _runtime_base_dir()
+    candidates.append(base_dir / _FFMPEG_REL / f"{name}.exe")
+    candidates.append(base_dir / f"{name}.exe")
     return candidates
 
 

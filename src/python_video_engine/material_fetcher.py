@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -7,6 +8,8 @@ import random
 import shutil
 import subprocess
 import threading
+import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,7 +38,15 @@ PROBE_CACHE_FILE = ".python_video_engine_probe_cache.json"
 BAD_MATERIALS_FILE = ".python_video_engine_bad_materials.json"
 BLACKLIST_REASONS = {"timeout_error", "nal_error", "aac_decode_error"}
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+CACHE_ROOT_DIR = Path(os.path.expanduser('~/.jianying_auto_editor_cache'))
+CACHE_ROOT_DIR.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger("python_video_engine.material_fetcher")
+
+
+def _subprocess_no_window_kwargs() -> dict:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 @dataclass(slots=True)
@@ -58,6 +69,15 @@ class MaterialFetchResult:
     counts_by_category: dict[str, int]
 
 
+def _cache_state_paths(base_path: Path) -> tuple[Path, Path]:
+    key = hashlib.sha1(str(base_path).encode("utf-8", errors="ignore")).hexdigest()[:12]
+    base_name = base_path.name.strip() or "materials"
+    safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in base_name)
+    bucket = CACHE_ROOT_DIR / f"{safe_name}_{key}"
+    bucket.mkdir(parents=True, exist_ok=True)
+    return bucket / BAD_MATERIALS_FILE, bucket / PROBE_CACHE_FILE
+
+
 class MaterialFetcher:
     def __init__(self, progress_callback: Callable[[int, int, str], None] | None = None) -> None:
         if not logging.getLogger().handlers:
@@ -72,11 +92,10 @@ class MaterialFetcher:
         self._probe_cache_dirty_count = 0
 
     def fetch(self, base_path: str | Path, client_name: str) -> MaterialFetchResult:
-        resolved_base_path = Path(base_path).expanduser().resolve(strict=False)
+        resolved_base_path = Path(os.path.normpath(str(base_path).strip())).expanduser().resolve(strict=False)
         logger.info("[MaterialFetcher] 开始扫描客户素材: client=%s path=%s", client_name, resolved_base_path)
-        self._bad_state_path = resolved_base_path / BAD_MATERIALS_FILE
+        self._bad_state_path, self._probe_cache_path = _cache_state_paths(resolved_base_path)
         self._bad_materials = self._load_bad_materials(self._bad_state_path)
-        self._probe_cache_path = resolved_base_path / PROBE_CACHE_FILE
         self._probe_cache = self._load_probe_cache(self._probe_cache_path)
 
         keywords = self._load_keywords(resolved_base_path)
@@ -108,11 +127,10 @@ class MaterialFetcher:
         return MaterialFetchResult(client_name=client_name, base_path=str(resolved_base_path), keywords=keywords, materials=materials, counts_by_category=counts_by_category)
 
     def fetch_ready_then_background(self, base_path: str | Path, client_name: str, min_ready_materials: int = MIN_READY_MATERIALS) -> MaterialFetchResult:
-        resolved_base_path = Path(base_path).expanduser().resolve(strict=False)
+        resolved_base_path = Path(os.path.normpath(str(base_path).strip())).expanduser().resolve(strict=False)
         logger.info("[MaterialFetcher] 启动快速扫描: client=%s path=%s min_ready=%s", client_name, resolved_base_path, min_ready_materials)
-        self._bad_state_path = resolved_base_path / BAD_MATERIALS_FILE
+        self._bad_state_path, self._probe_cache_path = _cache_state_paths(resolved_base_path)
         self._bad_materials = self._load_bad_materials(self._bad_state_path)
-        self._probe_cache_path = resolved_base_path / PROBE_CACHE_FILE
         self._probe_cache = self._load_probe_cache(self._probe_cache_path)
 
         keywords = self._load_keywords(resolved_base_path)
@@ -349,7 +367,7 @@ class MaterialFetcher:
                 raise ValueError("invalid duration")
             return MaterialFileMeta(category=category, folder_name=file_path.parent.name, file_name=file_path.name, absolute_path=absolute_path, duration_seconds=duration_seconds, width=width, height=height)
         except Exception as err:
-            logger.error("[MaterialFetcher] 视频元数据提取失败，已跳过: file=%s err=%s", file_path, err)
+            logger.warning("[扫描跳过] 文件: %s, 原因: %s\n%s", file_path, err, traceback.format_exc())
             self._mark_bad_material(file_path, reason="metadata_failed", detail=str(err))
             return None
         finally:
@@ -359,30 +377,53 @@ class MaterialFetcher:
     def _probe_with_ffprobe(self, file_path: Path, timeout_seconds: float = PROBE_TIMEOUT_SECONDS, mark_timeout_bad: bool = True) -> tuple[float, int, int, float] | None:
         ffprobe = get_ffprobe_path()
         if not ffprobe:
+            logger.error("[ERROR] ffprobe 未找到: path=%s file=%s", ffprobe, file_path)
             return None
+
         cmd = [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration,r_frame_rate", "-of", "json", str(file_path)]
-        try:
-            completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout_seconds, encoding="utf-8", errors="replace")
-            payload = json.loads(completed.stdout or "{}")
-            streams = payload.get("streams", []) if isinstance(payload, dict) else []
-            if not streams:
-                raise ValueError("no video streams")
-            stream = streams[0] if isinstance(streams[0], dict) else {}
-            width = int(float(stream.get("width", 0) or 0))
-            height = int(float(stream.get("height", 0) or 0))
-            duration_seconds = round(float(stream.get("duration", 0.0) or 0.0), 3)
-            if duration_seconds <= 0:
-                raise ValueError("duration is zero")
-            fps = self._parse_fps(str(stream.get("r_frame_rate", "0/1") or "0/1"))
-            return duration_seconds, width, height, fps
-        except subprocess.TimeoutExpired:
-            logger.error("[MaterialFetcher] ffprobe 超时，已跳过: file=%s timeout=%.1fs", file_path, timeout_seconds)
-            if mark_timeout_bad:
-                self._mark_bad_material(file_path, reason="ffprobe_timeout", detail=f"timeout={timeout_seconds}")
-            return None
-        except Exception as err:
-            logger.warning("[MaterialFetcher] ffprobe 失败，将尝试 moviepy: file=%s err=%s", file_path, err)
-            return None
+        last_err: Exception | None = None
+        for retry_count in range(1, 4):
+            try:
+                completed = subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    encoding="utf-8",
+                    errors="replace",
+                    **_subprocess_no_window_kwargs(),
+                )
+                payload = json.loads(completed.stdout or "{}")
+                streams = payload.get("streams", []) if isinstance(payload, dict) else []
+                if not streams:
+                    raise ValueError("no video streams")
+                stream = streams[0] if isinstance(streams[0], dict) else {}
+                width = int(float(stream.get("width", 0) or 0))
+                height = int(float(stream.get("height", 0) or 0))
+                duration_seconds = round(float(stream.get("duration", 0.0) or 0.0), 3)
+                if duration_seconds <= 0:
+                    raise ValueError("duration is zero")
+                fps = self._parse_fps(str(stream.get("r_frame_rate", "0/1") or "0/1"))
+                return duration_seconds, width, height, fps
+            except Exception as err:
+                last_err = err
+                if retry_count < 3:
+                    logger.warning("[网络抖动] 读取失败，等待 1 秒后重试... (%s/3): %s", retry_count, file_path, exc_info=True)
+                    time.sleep(1)
+                    continue
+                if isinstance(err, subprocess.CalledProcessError):
+                    stderr = (err.stderr or "").strip()
+                    logger.error("[素材扫描失败] ffprobe 失败(已重试3次): path=%s returncode=%s stderr=%s", file_path, err.returncode, stderr, exc_info=True)
+                else:
+                    logger.error("[素材扫描失败] ffprobe 失败(已重试3次): path=%s err=%s", file_path, err, exc_info=True)
+                if mark_timeout_bad and isinstance(err, subprocess.TimeoutExpired):
+                    self._mark_bad_material(file_path, reason="ffprobe_timeout", detail=f"timeout={timeout_seconds}")
+                logger.warning("[MaterialFetcher] 单条视频扫描失败并跳过: file=%s", file_path, exc_info=True)
+                return None
+
+        logger.error("[ERROR] ffprobe 执行失败，已重试 3 次: ffprobe=%s file=%s err=%s", ffprobe, file_path, last_err)
+        return None
 
     def _parse_fps(self, raw_rate: str) -> float:
         try:
