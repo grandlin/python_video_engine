@@ -107,12 +107,25 @@ class AssemblyEngine:
 
         if actual_total < required_video_total:
             gap = round(required_video_total - actual_total, 3)
-            if clips:
+            if gap <= FORCE_INTERCEPT_TAIL_GAP_SECONDS and clips:
                 logger.info(f"[DEBUG 强制拦截] 正在拉长或减速最后一个视频片段，补齐缓冲时长 {gap} 秒")
                 last_clip = clips[-1]
                 extended = self._force_extend_last_clip(last_clip=last_clip, extend_seconds=gap)
                 fulfilled_seconds_by_category[last_clip.allocated_category] = round(fulfilled_seconds_by_category.get(last_clip.allocated_category, 0.0) + extended, 3)
                 actual_total = round(sum(x.clip_duration_seconds for x in clips), 3)
+            else:
+                logger.info("[Assembly] 总时长仍有缺口，向 02 借用并末尾补齐: gap=%.3fs", gap)
+                extra_clips, extra_seconds, _ = self._allocate_from_pool(
+                    source_category=FALLBACK_CATEGORY,
+                    requested_category=FALLBACK_CATEGORY,
+                    target_seconds=gap,
+                    pool=materials_by_category.get(FALLBACK_CATEGORY, []),
+                    order_start=len(clips),
+                )
+                clips.extend(extra_clips)
+                fulfilled_seconds_by_category[FALLBACK_CATEGORY] = round(fulfilled_seconds_by_category[FALLBACK_CATEGORY] + extra_seconds, 3)
+                if gap > extra_seconds:
+                    logger.info("[Assembly] 素材不足，已停止补片段并保持到音频结束，不再循环最后片段: remaining=%.3fs", round(gap - extra_seconds, 3))
 
         actual_total = round(sum(x.clip_duration_seconds for x in clips), 3)
         if actual_total < required_video_total:

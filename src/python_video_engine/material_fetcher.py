@@ -32,6 +32,7 @@ MATERIAL_CATEGORIES = {"panorama": "01_工厂全景与大环境", "machine": "02
 IGNORED_FOLDER_NAME = "04_人物实拍（老板&工人）"
 FALLBACK_CATEGORY = "machine"
 PROBE_TIMEOUT_SECONDS = 5.0
+MIN_READY_MATERIALS = 30
 BACKGROUND_RETRY_TIMEOUT_SECONDS = 8.0
 PROBE_CACHE_FILE = ".python_video_engine_probe_cache.json"
 BAD_MATERIALS_FILE = ".python_video_engine_bad_materials.json"
@@ -125,7 +126,7 @@ class MaterialFetcher:
 
         return MaterialFetchResult(client_name=client_name, base_path=str(resolved_base_path), keywords=keywords, materials=materials, counts_by_category=counts_by_category)
 
-    def fetch_ready_then_background(self, base_path: str | Path, client_name: str, min_ready_materials: int = 1) -> MaterialFetchResult:
+    def fetch_ready_then_background(self, base_path: str | Path, client_name: str, min_ready_materials: int = MIN_READY_MATERIALS) -> MaterialFetchResult:
         resolved_base_path = Path(os.path.normpath(str(base_path).strip())).expanduser().resolve(strict=False)
         logger.info("[MaterialFetcher] 启动快速扫描: client=%s path=%s min_ready=%s", client_name, resolved_base_path, min_ready_materials)
         self._bad_state_path, self._probe_cache_path = _cache_state_paths(resolved_base_path)

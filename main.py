@@ -34,12 +34,6 @@ _root_logger.addHandler(_file_handler)
 logger = logging.getLogger(__name__)
 
 
-def _subprocess_no_window_kwargs() -> dict:
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NO_WINDOW}
-    return {}
-
-
 def _global_excepthook(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
@@ -84,7 +78,6 @@ _install_audioop_compat()
 from src.python_video_engine import AssemblyEngine,ContentGenerator,DraftRenderer,MaterialFetcher,VideoExporter
 from src.python_video_engine.content_generator import DEFAULT_STYLE_PROMPTS
 from src.python_video_engine.ffmpeg_runtime import get_ffmpeg_path, get_ffprobe_path
-from src.python_video_engine.material_fetcher import _cache_state_paths
 from src.python_video_engine.runtime_config import USER_SETTINGS_PATH, cleanup_legacy_secret_cache, get_config_value, get_runtime_config
 from src.python_video_engine.network import ProxySettings, check_tcp_connectivity, get_default_log_dir
 
@@ -169,7 +162,7 @@ def open_log_folder() -> None:
     try:
         log_dir = get_default_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["explorer", str(log_dir)], check=False, **_subprocess_no_window_kwargs())
+        subprocess.run(["explorer", str(log_dir)], check=False)
     except Exception as exc:
         messagebox.showerror("打开失败", "无法打开日志文件夹。\n详情：" + str(exc))
 
@@ -246,7 +239,7 @@ def ensure_style_prompt_config()->dict:
 def _upsert_bad_materials(base_path: Path, bad_paths: list[str], reason: str, detail: str) -> None:
     if not bad_paths:
         return
-    state_path, _ = _cache_state_paths(base_path)
+    state_path = base_path / '.python_video_engine_bad_materials.json'
     payload = {}
     if state_path.exists():
         try:
@@ -478,7 +471,7 @@ class App:
         self.draft=tk.StringVar(value=cfg.get('draft_box_path','')); self.mix_output=tk.StringVar(value=cfg.get('mix_output_path','output_videos')); self.material=tk.StringVar(value=BASE); self.client=tk.StringVar(value=CLIENT); self.voice=tk.StringVar(value='温柔女声'); self.duration=tk.StringVar(value='15-30'); self.video_count=tk.IntVar(value=1); self.mode=tk.StringVar(value='draft'); self.lang_text=tk.StringVar(value='当前语种：zh'); self.status=tk.StringVar(value='请选择素材后开始生成'); self.script=tk.StringVar(value='生成文案后显示在这里'); self.output=tk.StringVar(value='生成结果会显示在这里'); self.draft_text=tk.StringVar(); self.mix_output_text=tk.StringVar(); self.progress_text=tk.StringVar(value='0%'); self.progress_value=tk.DoubleVar(value=0); self.buttons=[]; self.steps=[]; self.running=False
         # 文风选择相关
         self.style_keywords=tk.StringVar(value=''); self.selected_style_tags=[]; self.style_display=tk.StringVar(value='请选择文风')
-        self._style(); self._ui(); self._refresh_style_preview(); self._refresh_draft(); self._refresh_mix_output(); self._on_voice_changed(); self._show(3); self.root.after(100,self._ensure_draft); self.root.after(200,self._notify_style_config_recovery_if_needed); self._start_runtime_warmup()
+        self._style(); self._ui(); self._refresh_style_preview(); self._refresh_draft(); self._refresh_mix_output(); self._on_voice_changed(); self._show(3); self.root.after(100,self._ensure_draft); self.root.after(200,self._notify_style_config_recovery_if_needed)
     def _style(self):
         s=ttk.Style();
         try:s.theme_use('clam')
@@ -505,15 +498,15 @@ class App:
         self.p2=self._page2(); self.p2.grid(row=1,column=0,sticky='nsew',pady=(6,0))
 
         action_bar=ttk.Frame(self.left_panel,style='C.TFrame'); action_bar.grid(row=2,column=0,sticky='ew',pady=(8,0)); action_bar.columnconfigure(0,weight=1)
-        self.generate_button=ttk.Button(action_bar,text='开始生成',command=self._run,state='disabled')
+        self.generate_button=ttk.Button(action_bar,text='开始生成',command=self._run)
         self.generate_button.grid(row=0,column=0,sticky='w')
-        self.buttons=[self.generate_button, self.browse_button]
+        self.buttons=[self.generate_button]
 
         self.p3=self._page3(); self.p3.grid(row=0,column=0,sticky='nsew')
 
     def _page1(self):
         f=ttk.LabelFrame(self.left_panel,text='基础输入'); f.columnconfigure(1,weight=1)
-        ttk.Label(f,text='素材路径',style='B.TLabel').grid(row=0,column=0,sticky='w',padx=(6,6),pady=(6,4)); ttk.Entry(f,textvariable=self.material).grid(row=0,column=1,sticky='ew',pady=(6,4)); self.browse_button=ttk.Button(f,text='浏览',command=self._pick_material,state='disabled'); self.browse_button.grid(row=0,column=2,padx=(6,6),pady=(6,4))
+        ttk.Label(f,text='素材路径',style='B.TLabel').grid(row=0,column=0,sticky='w',padx=(6,6),pady=(6,4)); ttk.Entry(f,textvariable=self.material).grid(row=0,column=1,sticky='ew',pady=(6,4)); ttk.Button(f,text='浏览',command=self._pick_material).grid(row=0,column=2,padx=(6,6),pady=(6,4))
         ttk.Label(f,text='客户名称',style='B.TLabel').grid(row=1,column=0,sticky='w',padx=(6,6),pady=(2,4)); ttk.Entry(f,textvariable=self.client).grid(row=1,column=1,sticky='ew',pady=(2,4))
         ttk.Label(f,text='剪映草稿箱',style='B.TLabel').grid(row=2,column=0,sticky='w',padx=(6,6),pady=(2,4)); ttk.Label(f,textvariable=self.draft_text,style='B.TLabel').grid(row=2,column=1,columnspan=2,sticky='w',pady=(2,4))
         ttk.Label(f,text='混剪输出',style='B.TLabel').grid(row=3,column=0,sticky='w',padx=(6,6),pady=(2,6)); ttk.Label(f,textvariable=self.mix_output_text,style='B.TLabel').grid(row=3,column=1,columnspan=2,sticky='w',pady=(2,6))
@@ -843,42 +836,6 @@ class App:
         if getattr(self,'style_config_backup_path',''):
             tip+=f'\n已备份原文件：{self.style_config_backup_path}'
         messagebox.showwarning('配置已修复',tip)
-
-    def _start_runtime_warmup(self):
-        self.status.set('正在进行启动自检，请稍候...')
-
-        def _worker():
-            ready=False
-            detail=''
-            try:
-                ffprobe=get_ffprobe_path()
-                if ffprobe:
-                    try:
-                        completed=subprocess.run([ffprobe,'-version'],check=False,capture_output=True,text=True,timeout=5,encoding='utf-8',errors='replace',**_subprocess_no_window_kwargs())
-                        ready=completed.returncode==0
-                        if not ready:
-                            detail=(completed.stderr or completed.stdout or '').strip()
-                    except Exception as exc:
-                        detail=str(exc)
-                else:
-                    detail='未找到 ffprobe'
-            except Exception as exc:
-                detail=str(exc)
-
-            def _apply_ui():
-                if ready:
-                    self.status.set('引擎就绪')
-                    self.generate_button.configure(state='normal')
-                    self.browse_button.configure(state='normal')
-                    if not self.running:
-                        self._set_busy(False)
-                else:
-                    self.status.set('引擎初始化失败，请检查 FFmpeg/FFprobe 环境')
-                    self.output.set(f'启动自检失败：{detail}')
-
-            self.root.after(0,_apply_ui)
-
-        threading.Thread(target=_worker,daemon=True).start()
 
     def _ensure_draft(self):
         return

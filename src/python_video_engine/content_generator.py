@@ -408,9 +408,9 @@ class ContentGenerator:
         force_15_30 = self.target_duration == '15-30'
         force_30_60 = self.target_duration == '30-60'
         if force_15_30:
-            prompt += " 请严格将总字数绝对不可超过85个汉字。"
+            prompt += " 请严格将总字数控制在 65 至 85 个汉字之间。注意：绝对不能少于 65 个汉字，否则视频时长会不达标！"
         elif force_30_60:
-            prompt += " 请严格将总字数绝对不可超过180个汉字。"
+            prompt += " 请严格将总字数控制在 130 至 180 个汉字之间。注意：绝对不能少于 130 个汉字，否则视频时长会不达标！"
 
         last_content = ""
         for attempt in range(1, 4):
@@ -462,9 +462,9 @@ class ContentGenerator:
         force_15_30 = self.target_duration == '15-30'
         force_30_60 = self.target_duration == '30-60'
         if force_15_30:
-            prompt += " Total length MUST NOT exceed 50 words."
+            prompt += " Please strictly limit the total length to between 35 and 50 words. Warning: The word count MUST NOT be less than 35 words!"
         elif force_30_60:
-            prompt += " Total length MUST NOT exceed 110 words."
+            prompt += " Please strictly limit the total length to between 75 and 110 words. Warning: The word count MUST NOT be less than 75 words!"
 
         last_content = ""
         for attempt in range(1, 4):
@@ -727,19 +727,19 @@ class ContentGenerator:
 
     def _is_valid_zh_15_30_script(self, text: str) -> bool:
         cnt = self._count_chinese_chars(text)
-        return cnt <= 95
+        return 65 <= cnt <= 95
 
     def _is_valid_en_15_30_script(self, text: str) -> bool:
         cnt = self._count_english_words(text)
-        return cnt <= 55
+        return 35 <= cnt <= 55
 
     def _is_valid_zh_30_60_script(self, text: str) -> bool:
         cnt = self._count_chinese_chars(text)
-        return cnt <= 190
+        return 130 <= cnt <= 190
 
     def _is_valid_en_30_60_script(self, text: str) -> bool:
         cnt = self._count_english_words(text)
-        return cnt <= 120
+        return 75 <= cnt <= 120
 
     def _looks_degenerate_english_script(self, text: str) -> bool:
         words = re.findall(r"[A-Za-z]+", text.lower())
